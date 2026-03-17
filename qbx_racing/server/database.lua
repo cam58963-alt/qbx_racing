@@ -1,15 +1,21 @@
--- server/database.lua
+-- ===================================
+-- QBX Racing System - Database Helper Functions
+-- v4.2.0
+-- ※ server/main.lua でも直接クエリを実行しているため、
+--   これらは共通ユーティリティとして利用可能
+-- ===================================
 
 -- レース作成
 function CreateRace(data)
     local raceId = MySQL.insert.await([[
-        INSERT INTO qbx_races (name, creator_citizenid, creator_name, vehicle_type, laps) 
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO qbx_races (name, description, creator_driver_name, vehicle_type, race_type, laps) 
+        VALUES (?, ?, ?, ?, ?, ?)
     ]], {
         data.name,
-        data.creatorCitizenid,
+        data.description or '',
         data.creatorName,
-        data.vehicleType,
+        data.vehicleType or 'car',
+        data.raceType or 'circuit',
         data.laps or 1
     })
     
@@ -24,7 +30,7 @@ function CreateRace(data)
                 checkpoint.x,
                 checkpoint.y,
                 checkpoint.z,
-                checkpoint.radius or Config.Checkpoint.radius
+                checkpoint.radius or (Config.Checkpoint and Config.Checkpoint.radius or 10.0)
             })
         end
     end
@@ -37,7 +43,7 @@ function GetRaces(vehicleType)
     local query = [[
         SELECT r.*, COUNT(rt.id) as total_attempts,
                MIN(rt.time_ms) as best_time,
-               (SELECT player_name FROM qbx_race_times WHERE race_id = r.id ORDER BY time_ms ASC LIMIT 1) as best_player
+               (SELECT driver_name FROM qbx_race_times WHERE race_id = r.id ORDER BY time_ms ASC LIMIT 1) as best_player
         FROM qbx_races r
         LEFT JOIN qbx_race_times rt ON r.id = rt.race_id
         WHERE r.is_active = 1
@@ -57,7 +63,7 @@ end
 -- ランキング取得
 function GetLeaderboard(raceId, limit)
     return MySQL.query.await([[
-        SELECT player_name, time_ms, vehicle_model, completed_at,
+        SELECT driver_name, time_ms, vehicle_model, completed_at,
                ROW_NUMBER() OVER (ORDER BY time_ms ASC) as position
         FROM qbx_race_times
         WHERE race_id = ?
@@ -78,9 +84,14 @@ function GetPlayerBestTime(raceId, citizenid)
 end
 
 -- タイム記録
-function SaveRaceTime(raceId, citizenid, playerName, timeMs, vehicleModel)
+function SaveRaceTime(raceId, citizenid, driverName, timeMs, vehicleModel)
     return MySQL.insert.await([[
-        INSERT INTO qbx_race_times (race_id, citizenid, player_name, time_ms, vehicle_model) 
+        INSERT INTO qbx_race_times (race_id, citizenid, driver_name, time_ms, vehicle_model) 
         VALUES (?, ?, ?, ?, ?)
-    ]], {raceId, citizenid, playerName, timeMs, vehicleModel})
+    ]], {raceId, citizenid, driverName, timeMs, vehicleModel})
+end
+
+-- レース削除（論理削除）
+function DeleteRace(raceId)
+    return MySQL.update.await('UPDATE qbx_races SET is_active = 0 WHERE id = ?', {raceId})
 end

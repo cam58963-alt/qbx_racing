@@ -1,6 +1,6 @@
 -- ===================================
 -- QBX Racing System - Configuration
--- 完全統合版 v3.0.0
+-- 完全統合版 v4.2.0
 -- すべての設定項目を一元管理
 -- ===================================
 
@@ -10,11 +10,11 @@ Config = {}
 -- バージョン情報
 -- ===================================
 Config.Version = {
-    major = 3,
-    minor = 0,
+    major = 4,
+    minor = 2,
     patch = 0,
-    build = '2024.01',
-    name = 'Complete Edition'
+    build = '2026.03',
+    name = 'Race Delete & Bet Permission'
 }
 
 -- ===================================
@@ -23,9 +23,15 @@ Config.Version = {
 
 -- レース管理（作成・編集・削除）が可能なジョブ
 Config.RaceManagerJobs = {
-    'admin',           -- 管理者
-    'raceorganizer',   -- レース主催者
-    'eventmanager'     -- イベントマネージャー
+    'cityhall',        -- 市役所
+    'raceorganizer'    -- レース主催者
+}
+
+-- 掛けレース（ベットモード）セッションを作成できるジョブ
+-- ※通常の無料セッションは誰でも作成可能
+Config.BetRaceJobs = {
+    'cityhall',        -- 市役所
+    'raceorganizer'    -- レース主催者
 }
 
 -- ドライバーネーム制約
@@ -45,9 +51,20 @@ Config.VehicleTypes = {
         icon = 'fa-solid fa-car',
         color = '#ef4444',
         
-        -- マーカー設定
-        markerType = 1,
-        markerColor = {r = 255, g = 0, b = 0, a = 150},
+        -- チェックポイント設定（CreateCheckpoint ネイティブ使用）
+        -- 参考: https://docs.fivem.net/docs/game-references/checkpoints/
+        checkpoint = {
+            type = 0,              -- 通過CP: 矢印付き円柱（方向指示あり）
+            typeNoArrow = 2,       -- 通過CP（矢印なし・最終CP前）
+            goalType = 4,          -- ゴールCP: チェッカーフラッグ円柱
+            radius = 10.0,         -- チェックポイント半径
+            height = 5.0,          -- チェックポイント高さ
+            nearHeight = 100.0,    -- 近づいた時の描画高さ
+            color = {r = 255, g = 0, b = 0, a = 200},       -- メインCP色（赤）
+            goalColor = {r = 255, g = 215, b = 0, a = 200},  -- ゴール色（金）
+            nextColor = {r = 255, g = 255, b = 255, a = 80}, -- 次CP色（白半透明）
+            iconColor = {r = 255, g = 255, b = 255, a = 255} -- アイコン色
+        },
         
         -- 許可する車両クラス
         -- 0: Compacts, 1: Sedans, 2: SUVs, 3: Coupes, 4: Muscle, 5: Sports Classics
@@ -62,8 +79,19 @@ Config.VehicleTypes = {
         icon = 'fa-solid fa-helicopter',
         color = '#10b981',
         
-        markerType = 1,
-        markerColor = {r = 0, g = 255, b = 0, a = 150},
+        -- ヘリ用チェックポイント: リング型（空中通過用）
+        checkpoint = {
+            type = 12,             -- 通過CP: 矢印付きリング（空中飛行通過用）
+            typeNoArrow = 14,      -- 通過CP（矢印なし・最終CP前）
+            goalType = 16,         -- ゴールCP: チェッカーフラッグリング
+            radius = 15.0,         -- チェックポイント半径（ヘリ用大きめ）
+            height = 15.0,         -- チェックポイント高さ（リング）
+            nearHeight = 100.0,    -- 近づいた時の描画高さ
+            color = {r = 0, g = 255, b = 0, a = 200},        -- メインCP色（緑）
+            goalColor = {r = 255, g = 215, b = 0, a = 200},   -- ゴール色（金）
+            nextColor = {r = 255, g = 255, b = 255, a = 80},  -- 次CP色（白半透明）
+            iconColor = {r = 255, g = 255, b = 255, a = 255}  -- アイコン色
+        },
         
         allowedClasses = {
             15, -- Helicopters
@@ -77,8 +105,19 @@ Config.VehicleTypes = {
         icon = 'fa-solid fa-ship',
         color = '#3b82f6',
         
-        markerType = 1,
-        markerColor = {r = 0, g = 0, b = 255, a = 150},
+        -- ボート用チェックポイント: 円柱型（水上用）
+        checkpoint = {
+            type = 0,              -- 通過CP: 矢印付き円柱
+            typeNoArrow = 2,       -- 通過CP（矢印なし）
+            goalType = 4,          -- ゴールCP: チェッカーフラッグ円柱
+            radius = 12.0,         -- チェックポイント半径（ボート用やや大きめ）
+            height = 5.0,          -- チェックポイント高さ
+            nearHeight = 100.0,    -- 近づいた時の描画高さ
+            color = {r = 0, g = 100, b = 255, a = 200},      -- メインCP色（青）
+            goalColor = {r = 255, g = 215, b = 0, a = 200},   -- ゴール色（金）
+            nextColor = {r = 255, g = 255, b = 255, a = 80},  -- 次CP色（白半透明）
+            iconColor = {r = 255, g = 255, b = 255, a = 255}  -- アイコン色
+        },
         
         allowedClasses = {
             14  -- Boats
@@ -147,7 +186,7 @@ Config.Checkpoint = {
 -- ===================================
 Config.Race = {
     -- カウントダウン
-    countdownSeconds = 5,        -- ソロレースのカウントダウン時間
+    countdownSeconds = 3,        -- ソロレースのカウントダウン時間（スタート地点到着後）
     
     -- 基本報酬（練習・タイムアタック用）
     baseRewards = {
@@ -244,6 +283,7 @@ Config.Multiplayer = {
     -- ===================================
     ghostMode = {
         enabled = true,                -- ゴーストモード有効化
+        soloEnabled = true,            -- ソロレースでもゴーストモード有効化（NPC衝突回避）
         
         -- 動作モード
         mode = 'complete',             -- 'participants_only' または 'complete'
@@ -287,7 +327,7 @@ Config.Multiplayer = {
 -- レース参加者専用オブジェクト設定
 -- ===================================
 Config.RaceObjects = {
-    enabled = true,                -- オブジェクト生成の有効化
+    enabled = false,               -- オブジェクト生成の無効化（CreateCheckpointで十分なため）
     
     -- チェックポイント装飾
     checkpoint = {
@@ -348,10 +388,15 @@ Config.UI = {
     
     -- レース作成モード
     creationKeybinds = {
-        placeCheckpoint = 166,     -- F5
-        finishCreation = 167,      -- F6
-        cancelCreation = 168,      -- F7
+        placeCheckpoint = 38,      -- E
+        finishCreation = 45,       -- R
+        cancelCreation = 200,      -- ESC
         deleteLastCheckpoint = 177 -- Backspace
+    },
+    
+    -- レース中キーバインド
+    raceKeybinds = {
+        retire = 73               -- X キー（INPUT_VEH_DUCK = 73）でリタイア
     }
 }
 
@@ -514,8 +559,8 @@ function ValidateConfig()
         table.insert(errors, 'minParticipants cannot be greater than maxParticipants')
     end
     
-    if Config.Checkpoint and Config.Checkpoint.minCheckpoints < 2 then
-        table.insert(errors, 'minCheckpoints must be at least 2')
+    if Config.Checkpoint and Config.Checkpoint.minCheckpoints < 3 then
+        table.insert(errors, 'minCheckpoints must be at least 3')
     end
     
     -- エラー表示

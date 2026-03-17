@@ -1,6 +1,6 @@
 -- ===================================
 -- QBX Racing System - Server Main
--- 完全統合版 v3.0.0
+-- 完全統合版 v4.2.0
 -- ===================================
 
 -- ===================================
@@ -11,6 +11,30 @@ local ActiveSessions = {} -- アクティブなマルチプレイヤーセッシ
 -- ===================================
 -- ヘルパー関数群
 -- ===================================
+
+-- 安全なConfig値取得（サーバーサイド用）
+local function GetConfigValue(path, defaultValue)
+    local keys = {}
+    for key in string.gmatch(path, "[^%.]+") do
+        table.insert(keys, key)
+    end
+    
+    local current = Config
+    for _, key in ipairs(keys) do
+        if current and type(current) == 'table' and current[key] ~= nil then
+            current = current[key]
+        else
+            return defaultValue
+        end
+    end
+    return current
+end
+
+-- 金額フォーマット
+local function FormatMoney(amount)
+    if not amount or amount == 0 then return '0' end
+    return tostring(amount):reverse():gsub('(%d%d%d)', '%1,'):reverse():gsub('^,', '')
+end
 
 -- QBXプレイヤー取得（環境対応版）
 local function GetPlayer(source)
@@ -42,13 +66,29 @@ local function GetDriverProfile(citizenid)
     )
 end
 
--- レース管理権限チェック
+-- レース管理権限チェック（作成・編集・削除）
 local function HasRacePermission(source)
     local Player = GetPlayer(source)
     if not Player then return false end
     
     local job = Player.PlayerData.job.name
-    local allowedJobs = Config.RaceManagerJobs or {'admin'}
+    local allowedJobs = Config.RaceManagerJobs or {'cityhall', 'raceorganizer'}
+    
+    for _, allowedJob in ipairs(allowedJobs) do
+        if job == allowedJob then
+            return true
+        end
+    end
+    return false
+end
+
+-- 掛けレース作成権限チェック
+local function HasBetRacePermission(source)
+    local Player = GetPlayer(source)
+    if not Player then return false end
+    
+    local job = Player.PlayerData.job.name
+    local allowedJobs = Config.BetRaceJobs or Config.RaceManagerJobs or {'cityhall', 'raceorganizer'}
     
     for _, allowedJob in ipairs(allowedJobs) do
         if job == allowedJob then
@@ -88,7 +128,8 @@ lib.callback.register('qbx_racing:getProfile', function(source)
     return {
         hasProfile = profile ~= nil,
         driverName = profile and profile.driver_name or nil,
-        isAdmin = HasRacePermission(source)
+        isAdmin = HasRacePermission(source),
+        canCreateBetRace = HasBetRacePermission(source)
     }
 end)
 
@@ -353,7 +394,15 @@ lib.callback.register('qbx_racing:server:createMultiSession', function(source, d
     local entryFee = 0
     local sponsorAmount = 0
     
-    if isBetMode and GetConfigValue('Race.betting.enabled', true) then
+    if isBetMode then
+        -- 掛けレース作成権限チェック
+        if not HasBetRacePermission(source) then
+            return {success = false, message = '掛けレースを作成する権限がありません（cityhall または raceorganizer が必要です）'}
+        end
+        
+        if not GetConfigValue('Race.betting.enabled', true) then
+            return {success = false, message = '掛けレース機能は無効になっています'}
+        end
         entryFee = tonumber(data.entryFee) or 0
         
         -- スポンサー金設定
@@ -518,7 +567,13 @@ lib.callback.register('qbx_racing:server:getActiveSessions', function(source)
                 vehicleType = session.race.vehicle_type,
                 hostName = session.hostName,
                 participantCount = #session.participants,
-                maxParticipants = Config.Multiplayer and Config.Multiplayer.maxParticipants or 16
+                maxParticipants = Config.Multiplayer and Config.Multiplayer.maxParticipants or 16,
+                -- 掛け金・スポンサー情報
+                isBetMode = session.isBetMode or false,
+                entryFee = session.entryFee or 0,
+                prizePool = session.prizePool or 0,
+                sponsorAmount = session.sponsorAmount or 0,
+                sponsorName = session.sponsorName or nil
             })
         end
     end
@@ -546,9 +601,9 @@ function RegisterSessionParticipant(sessionId, source, options)
         end
     end
     
-    -- 掛け金モードの場合は参加費を徴収
+    -- 掛け金モードの場合は参加費を徴収（ホストはスポンサー金で別途支払い済みのため免除可）
     local entryPaid = false
-    if session.isBetMode and session.entryFee > 0 and not (options.isHost and options.freeEntry ~= false) then
+    if session.isBetMode and session.entryFee > 0 and not options.isHost then
         local currency = GetConfigValue('Race.currency', 'cash')
         local balance = Player.Functions.GetMoney(currency)
         
@@ -980,10 +1035,7 @@ RegisterNetEvent('qbx_racing:server:finishMultiRace', function(sessionId, timeMs
     end
 end)
 
--- ヘルパー関数: 金額フォーマット
-function FormatMoney(amount)
-    return string.format('%s', tostring(amount):reverse():gsub('(%d%d%d)', '%1,'):reverse():gsub('^,', ''))
-end
+-- (FormatMoney はヘルパー関数セクションで定義済み)
 
 -- 最終結果発表
 function BroadcastFinalResults(sessionId)
@@ -1026,7 +1078,7 @@ function BroadcastFinalResults(sessionId)
     end
 end
 
--- server/main.lua のソロレース完了処理を修正
+-- ソロレース完了処理
 
 RegisterNetEvent('qbx_racing:server:finishRace', function(raceId, timeMs, vehicleModel)
     local src = source
@@ -1060,6 +1112,212 @@ end)
 
 
 -- ===================================
+-- レース削除機能
+-- ===================================
+lib.callback.register('qbx_racing:server:deleteRace', function(source, raceId)
+    if not raceId then
+        return {success = false, message = 'レースIDが指定されていません'}
+    end
+    
+    -- 権限チェック
+    if not HasRacePermission(source) then
+        return {success = false, message = 'レース削除権限がありません'}
+    end
+    
+    -- レース存在確認
+    local race = MySQL.single.await('SELECT * FROM qbx_races WHERE id = ? AND is_active = 1', {raceId})
+    if not race then
+        return {success = false, message = 'レースが見つかりません'}
+    end
+    
+    -- このレースを使用中のアクティブセッションがないか確認
+    for _, session in pairs(ActiveSessions) do
+        if session.raceId == raceId and session.status ~= 'finished' and session.status ~= 'cancelled' then
+            return {success = false, message = 'このレースは現在使用中のセッションがあるため削除できません'}
+        end
+    end
+    
+    -- 論理削除（is_active = 0）
+    local success = MySQL.update.await('UPDATE qbx_races SET is_active = 0 WHERE id = ?', {raceId})
+    
+    if success then
+        print(string.format('[QBX Racing] レース削除: ID=%d, Name=%s, 実行者=%s', raceId, race.name, tostring(source)))
+        
+        TriggerClientEvent('ox_lib:notify', source, {
+            title = '削除完了',
+            description = 'レース「' .. race.name .. '」を削除しました',
+            type = 'success'
+        })
+        
+        -- 全クライアントにレース一覧更新通知
+        TriggerClientEvent('qbx_racing:client:refreshRaces', -1)
+        
+        return {success = true}
+    else
+        return {success = false, message = 'データベースエラーが発生しました'}
+    end
+end)
+
+-- ===================================
+-- セッション離脱イベント
+-- ===================================
+RegisterNetEvent('qbx_racing:server:leaveSession', function(sessionId)
+    local src = source
+    local session = ActiveSessions[sessionId]
+    if not session then return end
+    
+    for i, participant in ipairs(session.participants) do
+        if participant.source == src then
+            -- 参加費の返金（ロビー状態の場合のみ）
+            if session.status == 'lobby' and session.isBetMode and participant.entryPaid then
+                local Player = GetPlayer(src)
+                if Player and session.entryFee > 0 then
+                    local currency = GetConfigValue('Race.currency', 'cash')
+                    Player.Functions.AddMoney(currency, session.entryFee, 'race-entry-refund')
+                    session.prizePool = session.prizePool - session.entryFee
+                    MySQL.update.await('UPDATE qbx_race_sessions SET prize_pool = ? WHERE id = ?', {session.prizePool, sessionId})
+                    
+                    TriggerClientEvent('ox_lib:notify', src, {
+                        title = '返金',
+                        description = string.format('参加費$%sを返金しました', FormatMoney(session.entryFee)),
+                        type = 'success'
+                    })
+                end
+            end
+            
+            table.remove(session.participants, i)
+            
+            -- DB更新
+            MySQL.update.await([[
+                DELETE FROM qbx_session_participants 
+                WHERE session_id = ? AND citizenid = (
+                    SELECT citizenid FROM qbx_driver_profiles WHERE driver_name = ?
+                )
+            ]], {sessionId, participant.driverName})
+            
+            -- 主催者が離脱した場合 → セッションキャンセル＋スポンサー返金
+            if session.host == src then
+                session.status = 'cancelled'
+                MySQL.update.await('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'cancelled', sessionId})
+                
+                -- スポンサー金返金
+                if session.sponsorAmount and session.sponsorAmount > 0 then
+                    local hostPlayer = GetPlayer(src)
+                    if hostPlayer then
+                        local currency = GetConfigValue('Race.currency', 'cash')
+                        hostPlayer.Functions.AddMoney(currency, session.sponsorAmount, 'race-sponsor-refund')
+                        TriggerClientEvent('ox_lib:notify', src, {
+                            title = '返金',
+                            description = string.format('スポンサー金$%sを返金しました', FormatMoney(session.sponsorAmount)),
+                            type = 'success'
+                        })
+                    end
+                end
+                
+                -- 残りの参加者に参加費返金＋通知
+                for _, p in ipairs(session.participants) do
+                    if session.isBetMode and p.entryPaid and session.entryFee > 0 then
+                        local pPlayer = GetPlayer(p.source)
+                        if pPlayer then
+                            local currency = GetConfigValue('Race.currency', 'cash')
+                            pPlayer.Functions.AddMoney(currency, session.entryFee, 'race-entry-refund')
+                        end
+                    end
+                    
+                    TriggerClientEvent('qbx_racing:client:sessionCancelled', p.source, {
+                        sessionId = sessionId,
+                        reason = '主催者が退出しました'
+                    })
+                    TriggerClientEvent('ox_lib:notify', p.source, {
+                        title = 'セッション終了',
+                        description = '主催者が退出したため、セッションが終了しました（参加費は返金済み）',
+                        type = 'error'
+                    })
+                end
+                
+                ActiveSessions[sessionId] = nil
+            else
+                BroadcastSessionUpdate(sessionId)
+                
+                TriggerClientEvent('ox_lib:notify', src, {
+                    title = 'セッション退出',
+                    description = 'セッションから退出しました',
+                    type = 'inform'
+                })
+            end
+            break
+        end
+    end
+end)
+
+-- ===================================
+-- セッションタイムアウト管理
+-- ===================================
+function StartSessionTimeoutThread()
+    CreateThread(function()
+        local checkInterval = 60000 -- 1分ごとにチェック
+        local sessionTimeout = Config.Multiplayer and Config.Multiplayer.sessionTimeout or 600
+        
+        while true do
+            Wait(checkInterval)
+            
+            local currentTime = os.time()
+            local sessionsToCancel = {}
+            
+            for sessionId, session in pairs(ActiveSessions) do
+                if session.status == 'lobby' and session.createdAt then
+                    local elapsed = currentTime - session.createdAt
+                    if elapsed >= sessionTimeout then
+                        table.insert(sessionsToCancel, sessionId)
+                    end
+                end
+            end
+            
+            for _, sessionId in ipairs(sessionsToCancel) do
+                local session = ActiveSessions[sessionId]
+                if session then
+                    session.status = 'cancelled'
+                    MySQL.update.await('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'cancelled', sessionId})
+                    
+                    -- 参加者に返金＋通知
+                    for _, p in ipairs(session.participants) do
+                        if session.isBetMode and p.entryPaid and session.entryFee > 0 then
+                            local pPlayer = GetPlayer(p.source)
+                            if pPlayer then
+                                local currency = GetConfigValue('Race.currency', 'cash')
+                                pPlayer.Functions.AddMoney(currency, session.entryFee, 'race-timeout-refund')
+                            end
+                        end
+                        
+                        TriggerClientEvent('qbx_racing:client:sessionCancelled', p.source, {
+                            sessionId = sessionId,
+                            reason = 'セッションがタイムアウトしました'
+                        })
+                        TriggerClientEvent('ox_lib:notify', p.source, {
+                            title = 'セッションタイムアウト',
+                            description = '一定時間開始されなかったため、セッションが終了しました（参加費は返金済み）',
+                            type = 'error'
+                        })
+                    end
+                    
+                    -- スポンサー返金
+                    if session.sponsorAmount and session.sponsorAmount > 0 and session.host then
+                        local hostPlayer = GetPlayer(session.host)
+                        if hostPlayer then
+                            local currency = GetConfigValue('Race.currency', 'cash')
+                            hostPlayer.Functions.AddMoney(currency, session.sponsorAmount, 'race-sponsor-timeout-refund')
+                        end
+                    end
+                    
+                    print(string.format('[QBX Racing] セッションタイムアウト: ID=%d (%d秒経過)', sessionId, sessionTimeout))
+                    ActiveSessions[sessionId] = nil
+                end
+            end
+        end
+    end)
+end
+
+-- ===================================
 -- 初期化とクリーンアップ
 -- ===================================
 
@@ -1074,6 +1332,9 @@ AddEventHandler('onResourceStart', function(resourceName)
     -- 既存のセッションクリーンアップ
     MySQL.update.await("UPDATE qbx_race_sessions SET status = 'cancelled' WHERE status IN ('lobby', 'countdown', 'racing')")
     ActiveSessions = {}
+    
+    -- セッションタイムアウト管理スレッド開始
+    StartSessionTimeoutThread()
 end)
 
 -- リソース停止時
@@ -1096,18 +1357,31 @@ AddEventHandler('playerDropped', function(reason)
     for sessionId, session in pairs(ActiveSessions) do
         for i, participant in ipairs(session.participants) do
             if participant.source == src then
+                -- ロビー中の参加費返金は不要（切断なので送金先がない）
                 table.remove(session.participants, i)
                 
-                -- 主催者が退出した場合はセッション終了
+                -- 主催者が切断した場合はセッション終了
                 if session.host == src then
                     session.status = 'cancelled'
                     MySQL.update.await('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'cancelled', sessionId})
                     
-                    -- 残りの参加者に通知
+                    -- 残りの参加者に参加費返金＋通知
                     for _, p in ipairs(session.participants) do
+                        if session.isBetMode and p.entryPaid and session.entryFee > 0 then
+                            local pPlayer = GetPlayer(p.source)
+                            if pPlayer then
+                                local currency = GetConfigValue('Race.currency', 'cash')
+                                pPlayer.Functions.AddMoney(currency, session.entryFee, 'race-entry-refund-host-dropped')
+                            end
+                        end
+                        
+                        TriggerClientEvent('qbx_racing:client:sessionCancelled', p.source, {
+                            sessionId = sessionId,
+                            reason = '主催者が切断しました'
+                        })
                         TriggerClientEvent('ox_lib:notify', p.source, {
                             title = 'セッション終了',
-                            description = '主催者が退出したため、セッションが終了しました',
+                            description = '主催者が切断したため、セッションが終了しました（参加費は返金済み）',
                             type = 'error'
                         })
                     end

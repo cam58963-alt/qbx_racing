@@ -4,7 +4,7 @@ lua54 'yes'
 
 author 'QBX Racing Team'
 description 'QBX Racing System - Complete Multiplayer Racing with Ghost Mode'
-version '4.0.0'
+version '4.2.0'
 
 shared_scripts {
     '@ox_lib/init.lua',
@@ -13,6 +13,7 @@ shared_scripts {
 
 server_scripts {
     '@oxmysql/lib/MySQL.lua',
+    'server/database.lua',
     'server/main.lua'
 }
 
