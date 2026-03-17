@@ -1,0 +1,144 @@
+<!-- html/index.html -->
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QBX Racing System</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div id="racing-ui" class="racing-container" style="display: none;">
+        
+        <!-- ドライバー登録モーダル -->
+        <div id="driver-setup-modal" class="modal" style="display: none;">
+            <div class="modal-content">
+                <h2><i class="fas fa-user-plus"></i> ドライバー登録</h2>
+                <p>レースに参加するためのドライバーネームを設定してください。</p>
+                <input type="text" id="driver-name-input" placeholder="例: SpeedRacer123" maxlength="20">
+                <div class="modal-buttons">
+                    <button id="register-driver-btn" class="btn-primary">
+                        <i class="fas fa-check"></i> 登録
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- メイン画面 -->
+        <div id="main-screen" class="screen">
+            <!-- ヘッダー（修正版） -->
+            <div class="header">
+                <div class="header-left">
+                    <div class="header-title-row">
+                        <h1><i class="fas fa-flag-checkered"></i> QBX Racing</h1>
+                        <!-- ×ボタンをタイトル横に移動 -->
+                        <button id="close-ui-btn" class="btn-close-header">
+                            <i class="fas fa-times"></i>
+                        </button>
+                    </div>
+                    <div class="driver-info">
+                        <span>ドライバー: </span>
+                        <span id="current-driver-name" class="driver-name">Loading...</span>
+                        <button id="edit-driver-btn" class="btn-icon">
+                            <i class="fas fa-edit"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="header-right">
+                    <div class="filter-group">
+                        <button class="filter-btn active" data-filter="all">
+                            <i class="fas fa-globe"></i> すべて
+                        </button>
+                        <button class="filter-btn" data-filter="car">
+                            <i class="fas fa-car"></i> 車
+                        </button>
+                        <button class="filter-btn" data-filter="heli">
+                            <i class="fas fa-helicopter"></i> ヘリ
+                        </button>
+                        <button class="filter-btn" data-filter="boat">
+                            <i class="fas fa-ship"></i> ボート
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 検索バー -->
+            <div class="search-bar">
+                <input type="text" id="search-input" placeholder="レース名またはドライバー名で検索...">
+                <i class="fas fa-search"></i>
+            </div>
+
+            <!-- レースグリッド（重要：横並び表示）-->
+            <div class="race-grid" id="race-grid">
+                <!-- JavaScriptで動的生成 -->
+            </div>
+
+            <!-- ページネーション -->
+            <div class="pagination" id="pagination">
+                <button class="page-btn" id="prev-page">
+                    <i class="fas fa-chevron-left"></i> 前へ
+                </button>
+                <div class="page-numbers" id="page-numbers"></div>
+                <button class="page-btn" id="next-page">
+                    次へ <i class="fas fa-chevron-right"></i>
+                </button>
+            </div>
+
+            <!-- 管理者ボタン -->
+            <div id="admin-controls" class="admin-controls" style="display: none;">
+                <button id="create-race-btn" class="btn-admin">
+                    <i class="fas fa-plus"></i> 新規レース作成
+                </button>
+            </div>
+        </div>
+
+        <!-- レース詳細モーダル -->
+        <div id="race-detail-modal" class="modal" style="display: none;">
+            <div class="modal-content large">
+                <div class="modal-header">
+                    <h2 id="detail-race-name"></h2>
+                    <button class="close-modal"><i class="fas fa-times"></i></button>
+                </div>
+                
+                <div class="detail-body">
+                    <div class="race-info">
+                        <div class="info-grid">
+                            <div class="info-item">
+                                <label>車両タイプ:</label>
+                                <span id="detail-vehicle-type"></span>
+                            </div>
+                            <div class="info-item">
+                                <label>周回数:</label>
+                                <span id="detail-laps"></span>
+                            </div>
+                            <div class="info-item">
+                                <label>作成者:</label>
+                                <span id="detail-creator"></span>
+                            </div>
+                            <div class="info-item">
+                                <label>参加回数:</label>
+                                <span id="detail-attempts"></span>
+                            </div>
+                        </div>
+                        
+                        <button id="start-race-btn" class="btn-start">
+                            <i class="fas fa-play"></i> レーススタート
+                        </button>
+                    </div>
+                    
+                    <div class="leaderboard">
+                        <h3><i class="fas fa-trophy"></i> ランキング TOP 20</h3>
+                        <div class="leaderboard-list" id="leaderboard-list">
+                            <!-- JavaScriptで生成 -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="js/script.js"></script>
+</body>
+</html>
