@@ -1,7 +1,10 @@
 -- ===================================
 -- QBX Racing System - Client Main
--- 完全統合版 v3.0.0
--- UI制御・NUI通信・セッション管理
+-- v4.2.0
+-- ===================================
+-- UI構成:
+--   NUI HTML (html/) → メイン画面（レース一覧・詳細・ドライバー登録・ランキング）
+--   ox_lib           → ダイアログ・コンテキストメニュー・HUD・通知
 -- ===================================
 
 -- ===================================
@@ -397,7 +400,8 @@ RegisterCommand('race', function()
                 action = 'openUI',
                 hasProfile = profileData.hasProfile,
                 driverName = profileData.driverName,
-                isAdmin = profileData.isAdmin
+                isAdmin = profileData.isAdmin,
+                isRacing = IsCurrentlyRacing and IsCurrentlyRacing() or false
             })
             
             DebugLog('UI opened successfully')
@@ -488,6 +492,57 @@ RegisterNUICallback('updateDriverName', function(data, cb)
             DebugLog('Driver name updated successfully')
         end
     end, data)
+end)
+
+-- ===================================
+-- NUIコールバック: スタート地点ウェイポイント
+-- ===================================
+RegisterNUICallback('setStartWaypoint', function(data, cb)
+    if not data or not data.raceId then
+        cb({})
+        return
+    end
+    
+    DebugLog('Setting waypoint for race start: ' .. data.raceId)
+    
+    lib.callback('qbx_racing:getRaceDetails', false, function(race)
+        if race and race.checkpoints and #race.checkpoints > 0 then
+            local startCp = race.checkpoints[1]
+            SetNewWaypoint(startCp.x, startCp.y)
+            
+            lib.notify({
+                title = 'ウェイポイント設置',
+                description = string.format('%s のスタート地点をマップに表示しました', race.name),
+                type = 'success',
+                duration = 3000
+            })
+            DebugLog('Waypoint set for race: ' .. race.name)
+        else
+            DebugLog('Failed to get race details for waypoint')
+        end
+    end, data.raceId)
+    
+    cb({})
+end)
+
+-- ===================================
+-- NUIコールバック: レース中リタイア
+-- ===================================
+RegisterNUICallback('retireRace', function(data, cb)
+    DebugLog('Cancel race button pressed from NUI')
+    
+    -- isMultiplayerRace は race_logic.lua でグローバル変数
+    if isMultiplayerRace and RetireMultiplayerRace then
+        RetireMultiplayerRace()
+    elseif RetireSoloRace then
+        RetireSoloRace()
+    end
+    
+    -- UIを閉じる
+    isUIOpen = false
+    SetNuiFocus(false, false)
+    
+    cb({})
 end)
 
 -- ===================================
@@ -618,10 +673,96 @@ RegisterNUICallback('joinSession', function(data, cb)
 end)
 
 -- ===================================
+-- NUIコールバック: レース削除
+-- ===================================
+RegisterNUICallback('deleteRace', function(data, cb)
+    if not data or not data.raceId then
+        cb({success = false, message = 'レースIDが指定されていません'})
+        return
+    end
+    
+    DebugLog('Deleting race: ' .. data.raceId)
+    
+    -- 確認ダイアログ表示
+    -- NUI側で確認済みのため、直接サーバーに送信
+    lib.callback('qbx_racing:server:deleteRace', false, function(result)
+        cb(result or {success = false, message = 'サーバーエラー'})
+        if result and result.success then
+            DebugLog('Race deleted successfully')
+        end
+    end, data.raceId)
+end)
+
+-- ===================================
+-- NUIコールバック: マルチセッション作成
+-- ※NUI HTMLを閉じてからox_lib inputDialogに遷移する
+-- ===================================
+RegisterNUICallback('createSessionDialog', function(data, cb)
+    if not data or not data.raceId then
+        cb({})
+        return
+    end
+    
+    DebugLog('Opening session create dialog for race: ' .. data.raceId)
+    
+    -- UIを閉じる（NUI側で既に閉じ処理済みだが念のため）
+    isUIOpen = false
+    SetNuiFocus(false, false)
+    
+    -- レース情報を取得してセッション作成ダイアログを表示
+    lib.callback('qbx_racing:getRaceDetails', false, function(race)
+        if race then
+            ShowSessionCreateDialog(race)
+        else
+            lib.notify({
+                title = 'エラー',
+                description = 'レース情報の取得に失敗しました',
+                type = 'error'
+            })
+        end
+    end, data.raceId)
+    
+    cb({})
+end)
+
+-- ===================================
+-- NUIコールバック: セッション参加一覧
+-- ※NUI HTMLを閉じてからox_lib contextMenuに遷移する
+-- ===================================
+RegisterNUICallback('joinSessionList', function(data, cb)
+    if not data or not data.raceId then
+        cb({})
+        return
+    end
+    
+    DebugLog('Opening session list for race: ' .. data.raceId)
+    
+    -- UIを閉じる
+    isUIOpen = false
+    SetNuiFocus(false, false)
+    
+    -- レース情報を取得してアクティブセッション一覧を表示
+    lib.callback('qbx_racing:getRaceDetails', false, function(race)
+        if race then
+            ShowActiveSessionsList(race)
+        else
+            lib.notify({
+                title = 'エラー',
+                description = 'レース情報の取得に失敗しました',
+                type = 'error'
+            })
+        end
+    end, data.raceId)
+    
+    cb({})
+end)
+
+-- ===================================
 -- NUIコールバック: レース作成
 -- ===================================
 
 -- レース作成開始
+-- ※NUI HTMLを閉じてからox_lib inputDialogに遷移する
 RegisterNUICallback('createRace', function(data, cb)
     DebugLog('Starting race creation flow')
     
@@ -756,15 +897,11 @@ function ShowSessionLobby(sessionId, isHost, race)
             icon = 'fa-solid fa-sign-out-alt',
             iconColor = '#ef4444',
             onSelect = function()
+                -- サーバーに離脱通知（返金処理もサーバー側で実行）
+                TriggerServerEvent('qbx_racing:server:leaveSession', sessionId)
                 isInSession = false
                 currentSession = nil
                 sessionParticipants = {}
-                
-                lib.notify({
-                    title = 'セッション退出',
-                    description = 'セッションから退出しました',
-                    type = 'inform'
-                })
                 DebugLog('Left session: ' .. sessionId)
             end
         })
@@ -804,19 +941,23 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
     local minCheckpoints = GetConfigValue('Checkpoint.minCheckpoints', 3)
     local checkpointRadius = GetConfigValue('Checkpoint.radius', 10.0)
     
+    -- キーバインドをConfigから取得
+    local keyPlace = GetConfigValue('UI.creationKeybinds.placeCheckpoint', 38)     -- E
+    local keyFinish = GetConfigValue('UI.creationKeybinds.finishCreation', 45)      -- R
+    local keyCancel = GetConfigValue('UI.creationKeybinds.cancelCreation', 200)     -- ESC
+    local keyDelete = GetConfigValue('UI.creationKeybinds.deleteLastCheckpoint', 177) -- Backspace
+    
     DebugLog('Starting checkpoint mode for: ' .. raceCreationData.name)
     
     -- 操作ガイドを左側に表示
-    lib.showTextUI(string.format([[
-🏁 レース作成モード: %s
-
-[F5] チェックポイント設置
-[F6] 作成完了（最低%d個）
-[F7] 作成キャンセル
-[Backspace] 最後のポイント削除
-
-設置済み: 0個
-    ]], raceCreationData.name, minCheckpoints), {
+    lib.showTextUI(
+        '🏁 <b>レース作成モード</b>: ' .. raceCreationData.name .. '<br><br>'
+        .. '[E] チェックポイント設置<br>'
+        .. '[R] 作成完了（最低 ' .. minCheckpoints .. '個）<br>'
+        .. '[ESC] 作成キャンセル<br>'
+        .. '[Backspace] 最後のポイント削除<br><br>'
+        .. '設置済み: <b>0個</b>',
+    {
         position = "left-center",
         icon = 'map-marked-alt',
         style = {
@@ -874,8 +1015,8 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
                 end
             end
             
-            -- F5: チェックポイント設置
-            if IsControlJustPressed(0, 166) then -- F5
+            -- E: チェックポイント設置
+            if IsControlJustPressed(0, keyPlace) then -- E
                 table.insert(checkpoints, {
                     x = coords.x,
                     y = coords.y,
@@ -885,16 +1026,14 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
                 
                 -- ガイド更新
                 lib.hideTextUI()
-                lib.showTextUI(string.format([[
-🏁 レース作成モード: %s
-
-[F5] チェックポイント設置
-[F6] 作成完了（最低%d個）
-[F7] 作成キャンセル
-[Backspace] 最後のポイント削除
-
-設置済み: %d個
-                ]], raceCreationData.name, minCheckpoints, #checkpoints), {
+                lib.showTextUI(
+                    '🏁 <b>レース作成モード</b>: ' .. raceCreationData.name .. '<br><br>'
+                    .. '[E] チェックポイント設置<br>'
+                    .. '[R] 作成完了（最低 ' .. minCheckpoints .. '個）<br>'
+                    .. '[ESC] 作成キャンセル<br>'
+                    .. '[Backspace] 最後のポイント削除<br><br>'
+                    .. '設置済み: <b>' .. #checkpoints .. '個</b>',
+                {
                     position = "left-center",
                     icon = 'map-marked-alt',
                     style = {
@@ -916,21 +1055,19 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
             end
             
             -- Backspace: 最後のポイント削除
-            if IsControlJustPressed(0, 177) and #checkpoints > 0 then -- Backspace
+            if IsControlJustPressed(0, keyDelete) and #checkpoints > 0 then -- Backspace
                 table.remove(checkpoints)
                 
                 -- ガイド更新
                 lib.hideTextUI()
-                lib.showTextUI(string.format([[
-🏁 レース作成モード: %s
-
-[F5] チェックポイント設置
-[F6] 作成完了（最低%d個）
-[F7] 作成キャンセル
-[Backspace] 最後のポイント削除
-
-設置済み: %d個
-                ]], raceCreationData.name, minCheckpoints, #checkpoints), {
+                lib.showTextUI(
+                    '🏁 <b>レース作成モード</b>: ' .. raceCreationData.name .. '<br><br>'
+                    .. '[E] チェックポイント設置<br>'
+                    .. '[R] 作成完了（最低 ' .. minCheckpoints .. '個）<br>'
+                    .. '[ESC] 作成キャンセル<br>'
+                    .. '[Backspace] 最後のポイント削除<br><br>'
+                    .. '設置済み: <b>' .. #checkpoints .. '個</b>',
+                {
                     position = "left-center",
                     icon = 'map-marked-alt',
                     style = {
@@ -949,8 +1086,8 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
                 DebugLog('Checkpoint removed: ' .. #checkpoints)
             end
             
-            -- F6: 作成完了
-            if IsControlJustPressed(0, 167) then -- F6
+            -- R: 作成完了
+            if IsControlJustPressed(0, keyFinish) then -- R
                 if #checkpoints >= minCheckpoints then
                     -- サーバーにレース作成リクエスト送信
                     TriggerServerEvent('qbx_racing:server:createRace', {
@@ -983,8 +1120,8 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
                 end
             end
             
-            -- F7: 作成キャンセル
-            if IsControlJustPressed(0, 168) then -- F7
+            -- ESC: 作成キャンセル
+            if IsControlJustPressed(0, keyCancel) then -- ESC
                 isCreatingRace = false
                 raceCreationData = nil
                 lib.hideTextUI()
@@ -1096,9 +1233,9 @@ end)
 RegisterNetEvent('qbx_racing:client:countdownTick', function(data)
     local countdown = data.countdown
     
-    lib.showTextUI(string.format([[
-⏱️ %d
-    ]], countdown), {
+    lib.showTextUI(
+        '⏱️ <b>' .. countdown .. '</b>',
+    {
         position = "top-center",
         icon = 'stopwatch',
         style = {
@@ -1122,9 +1259,9 @@ end)
 RegisterNetEvent('qbx_racing:client:multiRaceStart', function(data)
     lib.hideTextUI()
     
-    lib.showTextUI([[
-🏁 GO!
-    ]], {
+    lib.showTextUI(
+        '🏁 <b>GO!</b>',
+    {
         position = "top-center",
         icon = 'flag-checkered',
         style = {
@@ -1150,6 +1287,28 @@ RegisterNetEvent('qbx_racing:client:multiRaceStart', function(data)
         StartMultiplayerRace(data.race, data.sessionId, data.participants)
     else
         print('^1[QBX Racing]^7 エラー: StartMultiplayerRace関数が見つかりません（race_logic.luaを確認してください）')
+    end
+end)
+
+-- セッションキャンセル通知（タイムアウト・主催者退出など）
+RegisterNetEvent('qbx_racing:client:sessionCancelled', function(data)
+    if data.sessionId == currentSession then
+        -- ロビーメニューが開いていたら閉じる
+        if lib.getOpenContextMenu() == 'qbx_racing_lobby' then
+            lib.hideContext()
+        end
+        
+        isInSession = false
+        currentSession = nil
+        sessionParticipants = {}
+        
+        lib.notify({
+            title = 'セッション終了',
+            description = data.reason or 'セッションがキャンセルされました',
+            type = 'error',
+            duration = 8000
+        })
+        DebugLog('Session cancelled: ' .. tostring(data.sessionId) .. ' - ' .. (data.reason or ''))
     end
 end)
 
@@ -1247,13 +1406,11 @@ CreateThread(function()
     while true do
         Wait(5000) -- 5秒ごとにチェック
         
-        -- UIの整合性チェック
-        if isUIOpen and not IsPauseMenuActive() then
-            local hasFocus = GetNuiFocus()
-            if not hasFocus then
-                DebugLog('UI state mismatch detected - correcting')
-                isUIOpen = false
-            end
+        -- UIの整合性チェック（ポーズメニュー中にUIが開いていたら閉じる）
+        if isUIOpen and IsPauseMenuActive() then
+            DebugLog('UI state mismatch detected (pause menu active) - correcting')
+            isUIOpen = false
+            SetNuiFocus(false, false)
         end
         
         -- セッション状態チェック

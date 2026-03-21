@@ -9,14 +9,47 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
 <body>
+    <!-- レース中HUDオーバーレイ（メインUI外に配置 - レース中も表示可能） -->
+    <div id="race-hud" class="race-hud" style="display: none;">
+        <div class="race-hud-content">
+            <div class="race-hud-title">
+                <i class="fas fa-flag-checkered"></i>
+                <span id="hud-race-type">スプリント</span> レース
+            </div>
+            <div class="race-hud-stats">
+                <div class="hud-stat">
+                    <i class="fas fa-stopwatch"></i>
+                    <span id="hud-time">0.00s</span>
+                </div>
+                <div class="hud-stat" id="hud-position-row" style="display: none;">
+                    <i class="fas fa-trophy"></i>
+                    <span id="hud-position">1 / 1</span>
+                </div>
+                <div class="hud-stat">
+                    <i class="fas fa-map-marker-alt"></i>
+                    CP: <span id="hud-checkpoint">0 / 0</span>
+                </div>
+                <div class="hud-stat">
+                    <i class="fas fa-redo"></i>
+                    ラップ: <span id="hud-lap">1 / 1</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div id="racing-ui" class="racing-container" style="display: none;">
+        
         
         <!-- ドライバー登録モーダル -->
         <div id="driver-setup-modal" class="modal" style="display: none;">
             <div class="modal-content">
                 <h2><i class="fas fa-user-plus"></i> ドライバー登録</h2>
-                <p>レースに参加するためのドライバーネームを設定してください。</p>
-                <input type="text" id="driver-name-input" placeholder="例: SpeedRacer123" maxlength="20">
+                <p class="modal-desc">レースに参加するためのドライバーネームを設定してください。</p>
+                <div class="input-group">
+                    <i class="fas fa-user input-icon"></i>
+                    <input type="text" id="driver-name-input" placeholder="例: SpeedRacer123" maxlength="20">
+                </div>
+                <p class="input-hint">3〜20文字 / 英数字とアンダースコアのみ</p>
                 <div class="modal-buttons">
                     <button id="register-driver-btn" class="btn-primary">
                         <i class="fas fa-check"></i> 登録
@@ -27,21 +60,20 @@
 
         <!-- メイン画面 -->
         <div id="main-screen" class="screen">
-            <!-- ヘッダー（修正版） -->
+            <!-- ヘッダー -->
             <div class="header">
                 <div class="header-left">
                     <div class="header-title-row">
                         <h1><i class="fas fa-flag-checkered"></i> QBX Racing</h1>
-                        <!-- ×ボタンをタイトル横に移動 -->
-                        <button id="close-ui-btn" class="btn-close-header">
+                        <button id="close-ui-btn" class="btn-close-header" title="閉じる (ESC)">
                             <i class="fas fa-times"></i>
                         </button>
                     </div>
                     <div class="driver-info">
-                        <span>ドライバー: </span>
+                        <i class="fas fa-id-badge"></i>
                         <span id="current-driver-name" class="driver-name">Loading...</span>
-                        <button id="edit-driver-btn" class="btn-icon">
-                            <i class="fas fa-edit"></i>
+                        <button id="edit-driver-btn" class="btn-icon" title="名前を変更">
+                            <i class="fas fa-pen"></i>
                         </button>
                     </div>
                 </div>
@@ -65,22 +97,22 @@
 
             <!-- 検索バー -->
             <div class="search-bar">
+                <i class="fas fa-search search-icon"></i>
                 <input type="text" id="search-input" placeholder="レース名またはドライバー名で検索...">
-                <i class="fas fa-search"></i>
             </div>
 
-            <!-- レースグリッド（重要：横並び表示）-->
+            <!-- レースグリッド -->
             <div class="race-grid" id="race-grid">
                 <!-- JavaScriptで動的生成 -->
             </div>
 
             <!-- ページネーション -->
             <div class="pagination" id="pagination">
-                <button class="page-btn" id="prev-page">
+                <button class="page-btn" id="prev-page" title="前のページ">
                     <i class="fas fa-chevron-left"></i> 前へ
                 </button>
                 <div class="page-numbers" id="page-numbers"></div>
-                <button class="page-btn" id="next-page">
+                <button class="page-btn" id="next-page" title="次のページ">
                     次へ <i class="fas fa-chevron-right"></i>
                 </button>
             </div>
@@ -91,6 +123,17 @@
                     <i class="fas fa-plus"></i> 新規レース作成
                 </button>
             </div>
+
+            <!-- レース中キャンセルボタン（レース中に/raceで開いた時に表示） -->
+            <div id="race-cancel-controls" class="race-cancel-controls" style="display: none;">
+                <div class="race-cancel-info">
+                    <i class="fas fa-exclamation-triangle"></i>
+                    <span>現在レース中です</span>
+                </div>
+                <button id="cancel-race-btn" class="btn-cancel-race">
+                    <i class="fas fa-times-circle"></i> レースをキャンセル
+                </button>
+            </div>
         </div>
 
         <!-- レース詳細モーダル -->
@@ -98,32 +141,50 @@
             <div class="modal-content large">
                 <div class="modal-header">
                     <h2 id="detail-race-name"></h2>
-                    <button class="close-modal"><i class="fas fa-times"></i></button>
+                    <button class="close-detail-modal" title="閉じる"><i class="fas fa-times"></i></button>
                 </div>
                 
                 <div class="detail-body">
                     <div class="race-info">
                         <div class="info-grid">
                             <div class="info-item">
-                                <label>車両タイプ:</label>
+                                <label><i class="fas fa-car"></i> 車両タイプ</label>
                                 <span id="detail-vehicle-type"></span>
                             </div>
                             <div class="info-item">
-                                <label>周回数:</label>
+                                <label><i class="fas fa-route"></i> レースタイプ</label>
+                                <span id="detail-race-type"></span>
+                            </div>
+                            <div class="info-item">
+                                <label><i class="fas fa-redo"></i> 周回数</label>
                                 <span id="detail-laps"></span>
                             </div>
                             <div class="info-item">
-                                <label>作成者:</label>
+                                <label><i class="fas fa-user"></i> 作成者</label>
                                 <span id="detail-creator"></span>
                             </div>
                             <div class="info-item">
-                                <label>参加回数:</label>
+                                <label><i class="fas fa-chart-bar"></i> 参加回数</label>
                                 <span id="detail-attempts"></span>
                             </div>
                         </div>
                         
+                        <button id="set-waypoint-btn" class="btn-waypoint">
+                            <i class="fas fa-map-marker-alt"></i> スタート地点をマップに表示
+                        </button>
                         <button id="start-race-btn" class="btn-start">
-                            <i class="fas fa-play"></i> レーススタート
+                            <i class="fas fa-play"></i> ソロレーススタート
+                        </button>
+                        <div class="multi-buttons">
+                            <button id="create-session-btn" class="btn-multi-create">
+                                <i class="fas fa-users-cog"></i> マルチセッション作成
+                            </button>
+                            <button id="join-session-btn" class="btn-multi-join">
+                                <i class="fas fa-sign-in-alt"></i> セッション参加
+                            </button>
+                        </div>
+                        <button id="delete-race-btn" class="btn-delete" style="display: none;">
+                            <i class="fas fa-trash-alt"></i> レース削除
                         </button>
                     </div>
                     
@@ -138,7 +199,6 @@
         </div>
     </div>
 
-    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script src="js/script.js"></script>
 </body>
 </html>
