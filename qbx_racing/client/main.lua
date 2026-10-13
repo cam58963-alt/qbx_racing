@@ -71,7 +71,15 @@ end
 
 -- タブレットのアプリが開いている/閉じたことを記録
 AddEventHandler(GetTabletResource() .. ':client:appOpened', function(appId)
-    if appId == GetTabletAppId() then tabletAppOpen = true end
+    if appId ~= GetTabletAppId() then return end
+    tabletAppOpen = true
+    
+    -- 全画面メニューが残っていたら閉じる（タブレットが後から起動した場合など）
+    if isUIOpen then
+        isUIOpen = false
+        SetNuiFocus(false, false)
+        SendNUIMessage({ action = 'closeUI' })
+    end
 end)
 
 AddEventHandler(GetTabletResource() .. ':client:appClosed', function(appId)
