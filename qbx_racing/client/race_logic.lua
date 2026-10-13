@@ -1402,7 +1402,7 @@ function UpdateRaceCheckpoints()
 end
 
 -- 自作マーカー描画（次のCP・曲がり角ガイド・予告・ゴール）
-local function DrawCustomRaceMarkers(turns, manualGuides, isCircuit)
+local function DrawCustomRaceMarkers(turns, isCircuit, vehicleType)
     local total = #raceCheckpoints
     local totalLaps = isCircuit and (currentRace.laps or 1) or 1
     
@@ -1414,24 +1414,23 @@ local function DrawCustomRaceMarkers(turns, manualGuides, isCircuit)
     -- 次に通過するチェックポイント
     local cp = raceCheckpoints[currentCheckpoint]
     local isFinish = IsFinish(currentLap, currentCheckpoint)
-    RaceMarkers.Draw(isFinish and 'finish' or 'checkpoint', cp)
+    RaceMarkers.Draw(isFinish and 'finish' or 'checkpoint', cp, nil, vehicleType)
     
-    -- 自動の曲がり角ガイド（ゴール以外）
-    local turn = not isFinish and turns[currentCheckpoint]
-    if turn then
-        RaceMarkers.Draw(turn.kind, turn)
+    -- ルート線（自分の位置から次のCPまで。周回レースは次の周の最初のCPへもつなぐ）
+    local nextCp = nil
+    if not isFinish then
+        local nextLap = currentCheckpoint == total and currentLap + 1 or currentLap
+        if nextLap <= totalLaps then
+            nextCp = raceCheckpoints[currentCheckpoint % total + 1]
+        end
     end
+    RaceMarkers.DrawRouteLine(GetEntityCoords(PlayerPedId()), cp, nextCp,
+        isFinish and 'finish' or 'checkpoint', vehicleType)
     
-    -- 手動の曲がり角ガイド（紐づいたCPか、その1つ前のCPに向かっている間に表示）
-    for ahead = 0, 1 do
-        local position = currentCheckpoint + ahead - 1
-        local lap = currentLap + math.floor(position / total)
-        local index = position % total + 1
-        
-        if lap <= totalLaps and manualGuides[index] then
-            for _, guide in ipairs(manualGuides[index]) do
-                RaceMarkers.Draw(guide.kind, guide)
-            end
+    -- 曲がり角ガイド（このCPに向かっている間、ゴール以外）
+    if not isFinish and turns[currentCheckpoint] then
+        for _, turn in ipairs(turns[currentCheckpoint]) do
+            RaceMarkers.DrawTurnGuide(turn, vehicleType)
         end
     end
     
@@ -1447,9 +1446,9 @@ local function DrawCustomRaceMarkers(turns, manualGuides, isCircuit)
         local previewCp = raceCheckpoints[index]
         local alpha = RaceMarkers.GetPreviewAlpha(ahead)
         if IsFinish(lap, index) then
-            RaceMarkers.Draw('finish', previewCp, alpha * 0.5)
+            RaceMarkers.Draw('finish', previewCp, alpha * 0.5, vehicleType)
         else
-            RaceMarkers.Draw('preview', previewCp, alpha)
+            RaceMarkers.Draw('preview', previewCp, alpha, vehicleType)
         end
     end
 end
@@ -1468,16 +1467,13 @@ function RaceDrawThread()
     end
 
     -- 自作マーカーは毎フレーム描画
+    local vehicleType = currentRace.vehicle_type or 'car'
     local isCircuit = currentRace.race_type ~= 'sprint'
-    local manualGuides, hasManualGuides = RaceMarkers.GroupManualGuides(currentRace.turnGuides)
-    local turns = {}
-    if not (hasManualGuides and RaceMarkers.ManualOverridesAuto()) then
-        turns = RaceMarkers.ComputeTurns(raceCheckpoints, isCircuit)
-    end
+    local turns = RaceMarkers.BuildTurnGuides(raceCheckpoints, isCircuit, currentRace.turnGuides, vehicleType)
     
     while isRacing and currentRace do
         if currentCheckpoint <= #raceCheckpoints then
-            DrawCustomRaceMarkers(turns, manualGuides, isCircuit)
+            DrawCustomRaceMarkers(turns, isCircuit, vehicleType)
         end
         
         Wait(0)

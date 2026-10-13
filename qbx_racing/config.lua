@@ -191,11 +191,15 @@ Config.Checkpoint = {
         rotation = vector3(90.0, 0.0, 0.0),      -- 画像が横倒し・逆さまに見える場合はここを調整
         faceCamera = true,                       -- 常にカメラの方を向ける
         
-        -- 判定範囲を示す薄いリング
+        -- 反応範囲の丸（ringColor がある画像に表示）
         radiusRing = {
             enabled = true,
-            height = 0.6,                        -- リングの高さ
-            alpha = 60                           -- リングの透明度（0-255）
+            outline = true,                      -- 輪郭線（地面に水平の丸）
+            outlineType = 25,                    -- 輪郭線のマーカータイプ（25 = 細い円）
+            outlineAlpha = 200,                  -- 輪郭線の透明度（0-255）
+            fill = true,                         -- 内側の薄い塗り
+            fillHeight = 0.6,                    -- 塗りの高さ
+            fillAlpha = 40                       -- 塗りの透明度（0-255）
         },
         
         -- 先のチェックポイントの予告表示
@@ -205,15 +209,40 @@ Config.Checkpoint = {
             fadeStep = 0.2                       -- 1個先へ行くごとに薄くする割合
         },
         
-        -- 曲がり角ガイド（オレンジの矢印）
-        -- 自動: コースが曲がるチェックポイントの外側に表示
-        -- 手動: コース作成モードで [←] [→] を押した場所に表示
+        -- ルート線（光る矢印をまっすぐ並べる）
+        routeLine = {
+            enabled = true,
+            from = 'player',                     -- 'player' = 自分の位置から次のCPまで / 'checkpoint' = 次のCPからその次のCPまで
+            image = 'html/img/markers/route_dash.png',  -- 白い画像（色は color で付ける）
+            color = nil,                         -- 線の色（nil = 目標のマーカーの ringColor に合わせる）
+            alpha = 200,                         -- 透明度（0-255、遠いほど薄くなる）
+            size = 3.0,                          -- 1区切りの大きさ（メートル）
+            spacing = 4.0,                       -- 区切りの間隔（メートル）
+            startDistance = 4.0,                 -- 自分から何メートル先から表示するか（from = 'player' のとき）
+            maxDistance = 60.0,                  -- 何メートル先まで表示するか
+            followGround = true,                 -- 地面に沿わせる
+            updateInterval = 100,                -- 位置の再計算の間隔（ミリ秒）
+            rotationOffset = 0.0,                -- 矢印の向きが進行方向とずれる場合に調整（例: 180.0 / 90.0）
+            linkNext = false,                    -- 次のチェックポイントからその次へ細い線を引く
+            linkAlpha = 150                      -- 細い線の透明度
+        },
+        
+        -- 曲がり角ガイド（オレンジの矢印、そのチェックポイントに向かっている間に表示）
+        -- 自動: コースの向きから曲がるチェックポイントを判定し、カーブの外側に表示
+        -- 手動: コース作成モードで [←] [→] を押した場所に表示（一番近いチェックポイントに紐づく）
         turnGuide = {
             enabled = true,
             auto = true,                         -- 自動ガイドを使うか
             manualOverridesAuto = true,          -- 手動ガイドがあるコースでは自動ガイドを出さない
-            minAngle = 35.0,                     -- この角度（度）以上曲がる場所にだけ表示
-            offset = 4.0                         -- チェックポイント半径からさらに外側へ離す距離（メートル）
+            minAngle = 35.0,                     -- この角度（度）以上曲がる場所にだけ表示（自動）
+            distance = 12.0,                     -- 自動ガイドをチェックポイントの中心からカーブの外側へ離す距離（メートル）
+            
+            -- 横に長いガイド（光の柱のない矢印 turn_strip_* を壁に沿う向きに並べる）
+            -- 手動: コース作成モードで置いた後に [↑] [↓] で長さを変更
+            autoLongAngle = 80.0,                -- 自動ガイドはこの角度（度）以上の急カーブで長くする（nil で無効）
+            autoLongSegments = 3,                -- 自動で長くするときの矢印の数
+            maxSegments = 8,                     -- 手動で並べられる矢印の最大数
+            segmentSpacing = 2.0                 -- 並べる間隔（メートル）
         },
         
         -- 用途別の画像（image はリソース内のパス、fxmanifest の files にも登録が必要）
@@ -228,7 +257,8 @@ Config.Checkpoint = {
             preview = {
                 image = 'html/img/markers/preview.png',
                 alpha = 150,
-                size = 10.0
+                size = 10.0,
+                ringColor = {r = 0, g = 220, b = 255}
             },
             -- ゴール（最終周の最後のチェックポイント）
             finish = {
@@ -246,6 +276,92 @@ Config.Checkpoint = {
                 image = 'html/img/markers/turn_right.png',
                 alpha = 240,
                 size = 8.0
+            },
+            -- 横に長いガイド用の矢印（光の柱なし、横に並べて使う）
+            turn_strip_left = {
+                image = 'html/img/markers/turn_strip_left.png',
+                alpha = 240,
+                size = 3.0,
+                groundAnchor = -0.3              -- 地面から少し浮かせる
+            },
+            turn_strip_right = {
+                image = 'html/img/markers/turn_strip_right.png',
+                alpha = 240,
+                size = 3.0,
+                groundAnchor = -0.3
+            }
+        },
+        
+        -- 乗り物ごとの画像セット（ここにない設定・画像は上の共通設定を使う）
+        vehicleTypes = {
+            -- ヘリ: 空中でくぐるリング型
+            heli = {
+                centerOnPoint = true,            -- チェックポイントの位置を中心に表示（空中）
+                turnGuideDistance = 16.0,        -- 自動ガイドをリングの外側に出す（反応範囲の半径 + 余白）
+                turnGuideSegmentSpacing = 4.0,   -- 横に長いガイドの並べる間隔
+                
+                -- 反応範囲（空中なので半透明の球。チェックポイントからこの半径以内で通過）
+                radiusRing = {
+                    enabled = true,
+                    sphere = true,
+                    sphereAlpha = 110,               -- 球の透明度（0-255）
+                    sphereScale = 1.0,               -- 球の大きさが反応範囲とずれる場合に調整
+                    outline = false,
+                    fill = false
+                },
+                
+                -- ルート線（次のチェックポイントからその次のチェックポイントへ、空中に矢印を並べる）
+                routeLine = {
+                    enabled = true,
+                    from = 'checkpoint',
+                    color = {r = 0, g = 220, b = 255},
+                    alpha = 220,
+                    size = 5.0,
+                    spacing = 8.0,
+                    maxDistance = 500.0,
+                    followGround = false,
+                    linkNext = false
+                },
+                
+                -- チェックポイントは半透明の球（反応範囲）＋マーカー（中心のひし形 / ゴールはチェッカーのリング）で表示
+                -- 球だけにする場合は showImage = false
+                styles = {
+                    checkpoint = {
+                        image = 'html/img/markers/heli_checkpoint.png',
+                        size = 5.0,
+                        alpha = 230,
+                        ringColor = {r = 120, g = 255, b = 0}
+                    },
+                    preview = {
+                        image = 'html/img/markers/heli_preview.png',
+                        size = 3.5,
+                        alpha = 150,
+                        ringColor = {r = 0, g = 220, b = 255}
+                    },
+                    finish = {
+                        image = 'html/img/markers/heli_finish.png',  -- チェッカー模様の帯付きリング
+                        sizeFromRadius = 2.5,            -- 画像の大きさ = 反応範囲の半径 × 2.5（リングの直径が球と一致）
+                        alpha = 240,
+                        ringColor = {r = 255, g = 210, b = 0}
+                    },
+                    turn_left = {
+                        image = 'html/img/markers/heli_turn_left.png',
+                        alpha = 240,
+                        size = 12.0
+                    },
+                    turn_right = {
+                        image = 'html/img/markers/heli_turn_right.png',
+                        alpha = 240,
+                        size = 12.0
+                    },
+                    -- 横に長いガイド（画像は共通の turn_strip_* を使う）
+                    turn_strip_left = {
+                        size = 6.0
+                    },
+                    turn_strip_right = {
+                        size = 6.0
+                    }
+                }
             }
         }
     }
@@ -464,7 +580,9 @@ Config.UI = {
         deleteLastCheckpoint = 177, -- Backspace
         placeTurnLeft = 174,       -- ← 左曲がりガイド設置
         placeTurnRight = 175,      -- → 右曲がりガイド設置
-        deleteLastTurnGuide = 178  -- Delete
+        deleteLastTurnGuide = 178, -- Delete 最後のガイド削除
+        longerTurnGuide = 172,     -- ↑ 最後のガイドを横に長く
+        shorterTurnGuide = 173     -- ↓ 最後のガイドを短く
     },
     
     -- レース中キーバインド
