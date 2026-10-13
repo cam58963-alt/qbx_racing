@@ -102,7 +102,9 @@ local function CloseMenuUI()
         SetNuiFocus(false, false)
     end
     
-    if IsTabletMode() then
+    -- タブレットはレーシングアプリを開いている時だけ閉じる
+    -- （レース情報の取得中などに別のアプリへ切り替えていたら、そのアプリを邪魔しない）
+    if tabletAppOpen and IsTabletMode() then
         local tablet = exports[GetTabletResource()]
         if tablet:IsOpen() then tablet:Close() end
     end
