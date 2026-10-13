@@ -302,7 +302,7 @@ Config.Checkpoint = {
                     linkNext = false
                 },
                 
-                -- チェックポイントは半透明の球（反応範囲）＋中心のマーカー（ひし形 / ゴールは丸いフラッグ）で表示
+                -- チェックポイントは半透明の球（反応範囲）＋マーカー（中心のひし形 / ゴールはチェッカーのリング）で表示
                 -- 球だけにする場合は showImage = false
                 styles = {
                     checkpoint = {
@@ -318,8 +318,8 @@ Config.Checkpoint = {
                         ringColor = {r = 0, g = 220, b = 255}
                     },
                     finish = {
-                        image = 'html/img/markers/finish.png',       -- 車と同じ黄色の丸いフラッグ
-                        size = 10.0,
+                        image = 'html/img/markers/heli_finish.png',  -- チェッカー模様の帯付きリング
+                        sizeFromRadius = 2.5,            -- 画像の大きさ = 反応範囲の半径 × 2.5（リングの直径が球と一致）
                         alpha = 240,
                         ringColor = {r = 255, g = 210, b = 0}
                     },
