@@ -947,26 +947,83 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
     local keyCancel = GetConfigValue('UI.creationKeybinds.cancelCreation', 200)     -- ESC
     local keyDelete = GetConfigValue('UI.creationKeybinds.deleteLastCheckpoint', 177) -- Backspace
     
+    local turnGuides = {}
+    local maxTurnGuides = GetConfigValue('Checkpoint.maxTurnGuides', 50)
+    local keyTurnLeft = GetConfigValue('UI.creationKeybinds.placeTurnLeft', 174)         -- ←
+    local keyTurnRight = GetConfigValue('UI.creationKeybinds.placeTurnRight', 175)       -- →
+    local keyDeleteTurn = GetConfigValue('UI.creationKeybinds.deleteLastTurnGuide', 178) -- Delete
+    
     DebugLog('Starting checkpoint mode for: ' .. raceCreationData.name)
     
     -- 操作ガイドを左側に表示
-    lib.showTextUI(
-        '🏁 <b>レース作成モード</b>: ' .. raceCreationData.name .. '<br><br>'
-        .. '[E] チェックポイント設置<br>'
-        .. '[R] 作成完了（最低 ' .. minCheckpoints .. '個）<br>'
-        .. '[ESC] 作成キャンセル<br>'
-        .. '[Backspace] 最後のポイント削除<br><br>'
-        .. '設置済み: <b>0個</b>',
-    {
-        position = "left-center",
-        icon = 'map-marked-alt',
-        style = {
-            borderRadius = 8,
-            backgroundColor = 'rgba(26, 26, 46, 0.95)',
-            color = '#ffffff',
-            borderLeft = '4px solid #ef4444'
-        }
-    })
+    local function ShowCreationGuide()
+        lib.showTextUI(
+            '🏁 <b>レース作成モード</b>: ' .. raceCreationData.name .. '<br><br>'
+            .. '[E] チェックポイント設置<br>'
+            .. '[R] 作成完了（最低 ' .. minCheckpoints .. '個）<br>'
+            .. '[ESC] 作成キャンセル<br>'
+            .. '[Backspace] 最後のポイント削除<br><br>'
+            .. '[←] [→] 曲がり角ガイド設置（左・右）<br>'
+            .. '[Delete] 最後のガイド削除<br><br>'
+            .. '設置済み: <b>' .. #checkpoints .. '個</b> / ガイド: <b>' .. #turnGuides .. '個</b>',
+        {
+            position = "left-center",
+            icon = 'map-marked-alt',
+            style = {
+                borderRadius = 8,
+                backgroundColor = 'rgba(26, 26, 46, 0.95)',
+                color = '#ffffff',
+                borderLeft = '4px solid #ef4444'
+            }
+        })
+    end
+    
+    -- 3D位置にテキスト表示
+    local function DrawLabel(x, y, z, text)
+        local onScreen, screenX, screenY = World3dToScreen2d(x, y, z)
+        if onScreen then
+            SetTextScale(0.5, 0.5)
+            SetTextFont(4)
+            SetTextProportional(1)
+            SetTextColour(255, 255, 255, 255)
+            SetTextOutline()
+            SetTextCentre(true)
+            SetTextEntry("STRING")
+            AddTextComponentString(text)
+            DrawText(screenX, screenY)
+        end
+    end
+    
+    -- 曲がり角ガイド設置（次に設置するチェックポイントに紐づける）
+    local function PlaceTurnGuide(coords, direction)
+        if #turnGuides >= maxTurnGuides then
+            lib.notify({
+                title = 'エラー',
+                description = string.format('曲がり角ガイドは最大 %d 個までです', maxTurnGuides),
+                type = 'error'
+            })
+            return
+        end
+        
+        table.insert(turnGuides, {
+            x = coords.x,
+            y = coords.y,
+            z = coords.z,
+            direction = direction,
+            checkpoint = #checkpoints + 1
+        })
+        
+        ShowCreationGuide()
+        lib.notify({
+            title = '曲がり角ガイド設置',
+            description = string.format('%sのガイドを設置しました（CP %d に向かう時に表示）',
+                direction == 'left' and '左' or '右', #checkpoints + 1),
+            type = 'success'
+        })
+        PlaySoundFrontend(-1, 'CHECKPOINT_PERFECT', 'HUD_MINI_GAME_SOUNDSET', true)
+    end
+    
+    ShowCreationGuide()
     
     -- 作成モードのメインループ
     CreateThread(function()
@@ -989,30 +1046,32 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
             
             -- 設置済みチェックポイントを表示
             for i, cp in ipairs(checkpoints) do
-                local color = i == #checkpoints and {0, 255, 0} or {0, 150, 255}
+                local isLatest = i == #checkpoints
                 
-                DrawMarker(
-                    1,
-                    cp.x, cp.y, cp.z - 1.0,
-                    0.0, 0.0, 0.0,
-                    0.0, 0.0, 0.0,
-                    cp.radius * 2, cp.radius * 2, 3.0,
-                    color[1], color[2], color[3], 200,
-                    false, false, 2, false, nil, nil, false
-                )
+                -- 自作マーカー（最新以外は薄く表示）、無効な場合は標準マーカー
+                if not RaceMarkers.Draw('checkpoint', cp, isLatest and 1.0 or 0.6) then
+                    local color = isLatest and {0, 255, 0} or {0, 150, 255}
+                    
+                    DrawMarker(
+                        1,
+                        cp.x, cp.y, cp.z - 1.0,
+                        0.0, 0.0, 0.0,
+                        0.0, 0.0, 0.0,
+                        cp.radius * 2, cp.radius * 2, 3.0,
+                        color[1], color[2], color[3], 200,
+                        false, false, 2, false, nil, nil, false
+                    )
+                end
                 
                 -- チェックポイント番号表示
-                local onScreen, screenX, screenY = World3dToScreen2d(cp.x, cp.y, cp.z + 1.5)
-                if onScreen then
-                    SetTextScale(0.5, 0.5)
-                    SetTextFont(4)
-                    SetTextProportional(1)
-                    SetTextColour(255, 255, 255, 255)
-                    SetTextOutline()
-                    SetTextEntry("STRING")
-                    AddTextComponentString(tostring(i))
-                    DrawText(screenX, screenY)
-                end
+                DrawLabel(cp.x, cp.y, cp.z + 1.5, tostring(i))
+            end
+            
+            -- 設置済み曲がり角ガイドを表示
+            for _, guide in ipairs(turnGuides) do
+                RaceMarkers.Draw(guide.direction == 'left' and 'turn_left' or 'turn_right', guide)
+                DrawLabel(guide.x, guide.y, guide.z + 1.5, string.format('%s CP%d',
+                    guide.direction == 'left' and '←' or '→', guide.checkpoint))
             end
             
             -- E: チェックポイント設置
@@ -1025,24 +1084,7 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
                 })
                 
                 -- ガイド更新
-                lib.hideTextUI()
-                lib.showTextUI(
-                    '🏁 <b>レース作成モード</b>: ' .. raceCreationData.name .. '<br><br>'
-                    .. '[E] チェックポイント設置<br>'
-                    .. '[R] 作成完了（最低 ' .. minCheckpoints .. '個）<br>'
-                    .. '[ESC] 作成キャンセル<br>'
-                    .. '[Backspace] 最後のポイント削除<br><br>'
-                    .. '設置済み: <b>' .. #checkpoints .. '個</b>',
-                {
-                    position = "left-center",
-                    icon = 'map-marked-alt',
-                    style = {
-                        borderRadius = 8,
-                        backgroundColor = 'rgba(26, 26, 46, 0.95)',
-                        color = '#ffffff',
-                        borderLeft = '4px solid #ef4444'
-                    }
-                })
+                ShowCreationGuide()
                 
                 lib.notify({
                     title = 'チェックポイント設置',
@@ -1058,25 +1100,15 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
             if IsControlJustPressed(0, keyDelete) and #checkpoints > 0 then -- Backspace
                 table.remove(checkpoints)
                 
+                -- 削除したCPの後に置いたガイドは、次に設置するCPに付け替える
+                for _, guide in ipairs(turnGuides) do
+                    if guide.checkpoint > #checkpoints + 1 then
+                        guide.checkpoint = #checkpoints + 1
+                    end
+                end
+                
                 -- ガイド更新
-                lib.hideTextUI()
-                lib.showTextUI(
-                    '🏁 <b>レース作成モード</b>: ' .. raceCreationData.name .. '<br><br>'
-                    .. '[E] チェックポイント設置<br>'
-                    .. '[R] 作成完了（最低 ' .. minCheckpoints .. '個）<br>'
-                    .. '[ESC] 作成キャンセル<br>'
-                    .. '[Backspace] 最後のポイント削除<br><br>'
-                    .. '設置済み: <b>' .. #checkpoints .. '個</b>',
-                {
-                    position = "left-center",
-                    icon = 'map-marked-alt',
-                    style = {
-                        borderRadius = 8,
-                        backgroundColor = 'rgba(26, 26, 46, 0.95)',
-                        color = '#ffffff',
-                        borderLeft = '4px solid #ef4444'
-                    }
-                })
+                ShowCreationGuide()
                 
                 lib.notify({
                     title = 'チェックポイント削除',
@@ -1084,6 +1116,25 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
                     type = 'inform'
                 })
                 DebugLog('Checkpoint removed: ' .. #checkpoints)
+            end
+            
+            -- ← / →: 曲がり角ガイド設置
+            if IsControlJustPressed(0, keyTurnLeft) then
+                PlaceTurnGuide(coords, 'left')
+            elseif IsControlJustPressed(0, keyTurnRight) then
+                PlaceTurnGuide(coords, 'right')
+            end
+            
+            -- Delete: 最後の曲がり角ガイド削除
+            if IsControlJustPressed(0, keyDeleteTurn) and #turnGuides > 0 then
+                table.remove(turnGuides)
+                ShowCreationGuide()
+                
+                lib.notify({
+                    title = '曲がり角ガイド削除',
+                    description = '最後のガイドを削除しました',
+                    type = 'inform'
+                })
             end
             
             -- R: 作成完了
@@ -1096,7 +1147,8 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
                         vehicleType = raceCreationData.vehicleType,
                         raceType = raceCreationData.raceType,
                         laps = raceCreationData.laps,
-                        checkpoints = checkpoints
+                        checkpoints = checkpoints,
+                        turnGuides = turnGuides
                     })
                     
                     -- 作成モード終了

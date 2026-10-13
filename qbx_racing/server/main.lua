@@ -56,6 +56,14 @@ local function GetPlayer(source)
     return success2 and corePlayer or nil
 end
 
+-- 曲がり角ガイド取得（手動設置分）
+local function GetRaceTurnGuides(raceId)
+    return MySQL.query.await([[
+        SELECT checkpoint_order, x, y, z, direction FROM qbx_race_turn_guides 
+        WHERE race_id = ? ORDER BY id ASC
+    ]], {raceId}) or {}
+end
+
 -- ドライバープロフィール取得
 local function GetDriverProfile(citizenid)
     if not citizenid then return nil end
@@ -261,6 +269,7 @@ lib.callback.register('qbx_racing:getRaceDetails', function(source, raceId)
             SELECT x, y, z, radius FROM qbx_race_checkpoints 
             WHERE race_id = ? ORDER BY checkpoint_order ASC
         ]], {raceId}) or {}
+        race.turnGuides = GetRaceTurnGuides(raceId)
     end
     
     return race
@@ -345,6 +354,35 @@ RegisterNetEvent('qbx_racing:server:createRace', function(data)
             })
         end
         
+        -- 曲がり角ガイド保存（最後のCPの後に置いたものは、周回レースならCP1に紐づける）
+        local checkpointCount = #data.checkpoints
+        local maxTurnGuides = Config.Checkpoint and Config.Checkpoint.maxTurnGuides or 50
+        local savedGuides = 0
+        for _, guide in ipairs(type(data.turnGuides) == 'table' and data.turnGuides or {}) do
+            if type(guide) ~= 'table' then goto continue end
+            
+            local order = tonumber(guide.checkpoint)
+            order = order and math.tointeger(order)
+            if order == checkpointCount + 1 and data.raceType ~= 'sprint' then
+                order = 1
+            end
+            
+            local x, y, z = tonumber(guide.x), tonumber(guide.y), tonumber(guide.z)
+            local isValid = order and order >= 1 and order <= checkpointCount
+                and x and y and z
+                and (guide.direction == 'left' or guide.direction == 'right')
+            
+            if isValid and savedGuides < maxTurnGuides then
+                MySQL.insert.await([[
+                    INSERT INTO qbx_race_turn_guides (race_id, checkpoint_order, x, y, z, direction) 
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ]], {raceId, order, x, y, z, guide.direction})
+                savedGuides = savedGuides + 1
+            end
+            
+            ::continue::
+        end
+        
         TriggerClientEvent('ox_lib:notify', src, {
             title = '成功',
             description = 'レース「' .. data.name .. '」を作成しました',
@@ -388,6 +426,7 @@ lib.callback.register('qbx_racing:server:createMultiSession', function(source, d
         SELECT x, y, z, radius FROM qbx_race_checkpoints 
         WHERE race_id = ? ORDER BY checkpoint_order ASC
     ]], {data.raceId}) or {}
+    race.turnGuides = GetRaceTurnGuides(data.raceId)
     
     -- 掛け金・スポンサー設定
     local isBetMode = data.betMode or false
@@ -1326,6 +1365,21 @@ AddEventHandler('onResourceStart', function(resourceName)
     if GetCurrentResourceName() ~= resourceName then return end
     
     print('^2[QBX Racing]^7 サーバーサイド起動完了')
+    
+    -- 曲がり角ガイドのテーブルを作成（既存サーバー向け）
+    MySQL.query.await([[
+        CREATE TABLE IF NOT EXISTS `qbx_race_turn_guides` (
+            `id` INT AUTO_INCREMENT PRIMARY KEY,
+            `race_id` INT NOT NULL,
+            `checkpoint_order` INT NOT NULL,
+            `x` DOUBLE NOT NULL,
+            `y` DOUBLE NOT NULL,
+            `z` DOUBLE NOT NULL,
+            `direction` ENUM('left', 'right') NOT NULL,
+            FOREIGN KEY (`race_id`) REFERENCES `qbx_races`(`id`) ON DELETE CASCADE,
+            INDEX `idx_race_guide` (`race_id`, `checkpoint_order`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ]])
     print('^2[QBX Racing]^7 マルチプレイヤーシステム: ' .. 
           (Config.Multiplayer and Config.Multiplayer.enabled and '有効' or '無効'))
     
