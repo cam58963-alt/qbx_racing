@@ -1402,7 +1402,7 @@ function UpdateRaceCheckpoints()
 end
 
 -- 自作マーカー描画（次のCP・曲がり角ガイド・予告・ゴール）
-local function DrawCustomRaceMarkers(turns, isCircuit)
+local function DrawCustomRaceMarkers(turns, isCircuit, vehicleType)
     local total = #raceCheckpoints
     local totalLaps = isCircuit and (currentRace.laps or 1) or 1
     
@@ -1414,12 +1414,12 @@ local function DrawCustomRaceMarkers(turns, isCircuit)
     -- 次に通過するチェックポイント
     local cp = raceCheckpoints[currentCheckpoint]
     local isFinish = IsFinish(currentLap, currentCheckpoint)
-    RaceMarkers.Draw(isFinish and 'finish' or 'checkpoint', cp)
+    RaceMarkers.Draw(isFinish and 'finish' or 'checkpoint', cp, nil, vehicleType)
     
     -- 曲がり角ガイド（緑のチェックポイントの横、ゴール以外）
     local turn = not isFinish and turns[currentCheckpoint]
     if turn then
-        RaceMarkers.Draw(turn.kind, turn)
+        RaceMarkers.Draw(turn.kind, turn, nil, vehicleType)
     end
     
     -- 先のチェックポイントの予告（周回レースは次の周までつなげて表示）
@@ -1434,9 +1434,9 @@ local function DrawCustomRaceMarkers(turns, isCircuit)
         local previewCp = raceCheckpoints[index]
         local alpha = RaceMarkers.GetPreviewAlpha(ahead)
         if IsFinish(lap, index) then
-            RaceMarkers.Draw('finish', previewCp, alpha * 0.5)
+            RaceMarkers.Draw('finish', previewCp, alpha * 0.5, vehicleType)
         else
-            RaceMarkers.Draw('preview', previewCp, alpha)
+            RaceMarkers.Draw('preview', previewCp, alpha, vehicleType)
         end
     end
 end
@@ -1455,13 +1455,13 @@ function RaceDrawThread()
     end
 
     -- 自作マーカーは毎フレーム描画
-    RaceMarkers.SetVehicleType(currentRace.vehicle_type or 'car')
+    local vehicleType = currentRace.vehicle_type or 'car'
     local isCircuit = currentRace.race_type ~= 'sprint'
-    local turns = RaceMarkers.BuildTurnGuides(raceCheckpoints, isCircuit, currentRace.turnGuides)
+    local turns = RaceMarkers.BuildTurnGuides(raceCheckpoints, isCircuit, currentRace.turnGuides, vehicleType)
     
     while isRacing and currentRace do
         if currentCheckpoint <= #raceCheckpoints then
-            DrawCustomRaceMarkers(turns, isCircuit)
+            DrawCustomRaceMarkers(turns, isCircuit, vehicleType)
         end
         
         Wait(0)

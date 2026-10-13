@@ -8,10 +8,6 @@ RaceMarkers = {}
 local markerConfig = Config.Checkpoint and Config.Checkpoint.customMarker or {}
 local isTextureReady = false
 
--- 乗り物ごとの画像セット（vehicleTypes にない乗り物は共通の styles を使う）
-local activeVehicleType = nil
-local activeSet = nil
-
 -- 画像をランタイムテクスチャとして登録（.ytd不要、PNGをそのまま使用）
 local function LoadMarkerTextures()
     if not markerConfig.enabled or not markerConfig.styles then return end
@@ -42,30 +38,30 @@ function RaceMarkers.IsEnabled()
     return isTextureReady
 end
 
--- 使う画像セットを乗り物の種類で切り替える（'car' / 'heli' / 'boat'）
-function RaceMarkers.SetVehicleType(vehicleType)
-    activeVehicleType = vehicleType
-    activeSet = vehicleType and markerConfig.vehicleTypes and markerConfig.vehicleTypes[vehicleType] or nil
+-- 乗り物ごとの画像セット（'car' / 'heli' / 'boat'、vehicleTypes にない乗り物は nil）
+-- レースとコース作成が同時に動いても混ざらないよう、描画ごとに乗り物の種類を渡す
+local function GetSet(vehicleType)
+    return vehicleType and markerConfig.vehicleTypes and markerConfig.vehicleTypes[vehicleType] or nil
 end
 
 -- 乗り物ごとの設定を優先して取得
-local function GetOption(key)
-    if activeSet and activeSet[key] ~= nil then return activeSet[key] end
+local function GetOption(set, key)
+    if set and set[key] ~= nil then return set[key] end
     return markerConfig[key]
 end
 
 -- 乗り物ごとの画像を優先し、なければ共通の画像を使う
-local function ResolveStyle(kind)
-    local styles = activeSet and activeSet.styles
+local function ResolveStyle(set, vehicleType, kind)
+    local styles = set and set.styles
     if styles and styles[kind] then
-        return styles[kind], activeVehicleType .. '_' .. kind
+        return styles[kind], vehicleType .. '_' .. kind
     end
     return markerConfig.styles[kind], kind
 end
 
 -- 反応範囲の丸を描画
-local function DrawRangeCircle(pos, z, color, alpha)
-    local ring = GetOption('radiusRing')
+local function DrawRangeCircle(set, pos, z, color, alpha)
+    local ring = GetOption(set, 'radiusRing')
     if not ring or not ring.enabled then return end
 
     local diameter = pos.radius * 2
@@ -103,26 +99,28 @@ end
 -- 自作マーカーを描画
 -- kind: styles のキー（'checkpoint' / 'preview' / 'finish' / 'turn_left' / 'turn_right'）
 -- pos: x, y, z（radius があれば反応範囲の丸も描画）
+-- vehicleType: 乗り物の種類（乗り物ごとの画像セットを使う）
 -- 無効時・未設定時は false を返すので、呼び出し側で標準マーカーを描画する
-function RaceMarkers.Draw(kind, pos, alphaScale)
+function RaceMarkers.Draw(kind, pos, alphaScale, vehicleType)
     if not isTextureReady then return false end
 
-    local style, textureName = ResolveStyle(kind)
+    local set = GetSet(vehicleType)
+    local style, textureName = ResolveStyle(set, vehicleType, kind)
     if not style then return false end
 
     -- 大きさ: 画像ごとの size > 反応範囲に合わせる（sizeFromRadius） > 共通の size
-    local sizeFromRadius = style.sizeFromRadius or GetOption('sizeFromRadius')
+    local sizeFromRadius = style.sizeFromRadius or GetOption(set, 'sizeFromRadius')
     local size = style.size
         or (sizeFromRadius and pos.radius and pos.radius * sizeFromRadius)
-        or GetOption('size') or 12.0
-    local anchor = style.groundAnchor or GetOption('groundAnchor') or 0.0
-    local rotation = GetOption('rotation') or vector3(90.0, 0.0, 0.0)
+        or GetOption(set, 'size') or 12.0
+    local anchor = style.groundAnchor or GetOption(set, 'groundAnchor') or 0.0
+    local rotation = GetOption(set, 'rotation') or vector3(90.0, 0.0, 0.0)
     local alpha = math.floor((style.alpha or 255) * (alphaScale or 1.0))
     local groundZ = pos.z - 1.0
 
     -- 空中のマーカー（ヘリ）はチェックポイントの位置を中心に、
     -- 地上のマーカーは画像の地面リング部分が地面に来るように高さを調整
-    local isCentered = GetOption('centerOnPoint')
+    local isCentered = GetOption(set, 'centerOnPoint')
     local markerZ = isCentered and pos.z or groundZ + size * (0.5 - anchor)
 
     DrawMarker(
@@ -132,13 +130,13 @@ function RaceMarkers.Draw(kind, pos, alphaScale)
         rotation.x, rotation.y, rotation.z,
         size, size, size,
         255, 255, 255, alpha,
-        false, GetOption('faceCamera') ~= false, 2, false,
+        false, GetOption(set, 'faceCamera') ~= false, 2, false,
         markerConfig.textureDict, textureName, false
     )
 
     -- 反応範囲の丸
     if style.ringColor and pos.radius then
-        DrawRangeCircle(pos, isCentered and pos.z or groundZ, style.ringColor, alpha)
+        DrawRangeCircle(set, pos, isCentered and pos.z or groundZ, style.ringColor, alpha)
     end
 
     return true
@@ -197,7 +195,7 @@ end
 
 -- 曲がり角ガイドの表示情報（緑のチェックポイントの横、曲がる側に置く）
 -- 戻り値: { kind = 'turn_left' / 'turn_right', x, y, z }
-function RaceMarkers.GetTurnGuide(checkpoints, index, isCircuit, direction)
+function RaceMarkers.GetTurnGuide(checkpoints, index, isCircuit, direction, vehicleType)
     local cp = checkpoints[index]
     local prev, nextCp = GetNeighbors(checkpoints, index, isCircuit)
 
@@ -214,7 +212,7 @@ function RaceMarkers.GetTurnGuide(checkpoints, index, isCircuit, direction)
     local sideX, sideY = -dirY, dirX
     if not isLeft then sideX, sideY = dirY, -dirX end
 
-    local offset = GetOption('turnGuideSideOffset')
+    local offset = GetOption(GetSet(vehicleType), 'turnGuideSideOffset')
         or (markerConfig.turnGuide and markerConfig.turnGuide.sideOffset) or 6.0
     guide.x = cp.x + sideX * offset
     guide.y = cp.y + sideY * offset
@@ -224,7 +222,7 @@ end
 -- 各チェックポイントの曲がり角ガイドを作る
 -- manualGuides: 手動で付けた方向（{ checkpoint_order, direction } のリスト）
 -- 戻り値: turns[i] = { kind, x, y, z }（曲がらない場合は nil）
-function RaceMarkers.BuildTurnGuides(checkpoints, isCircuit, manualGuides)
+function RaceMarkers.BuildTurnGuides(checkpoints, isCircuit, manualGuides, vehicleType)
     local turns = {}
     local guide = markerConfig.turnGuide
     if not guide or not guide.enabled then return turns end
@@ -246,7 +244,7 @@ function RaceMarkers.BuildTurnGuides(checkpoints, isCircuit, manualGuides)
     for i = 1, #checkpoints do
         local direction = manual[i] or (useAuto and DetectTurnDirection(checkpoints, i, isCircuit))
         if direction then
-            turns[i] = RaceMarkers.GetTurnGuide(checkpoints, i, isCircuit, direction)
+            turns[i] = RaceMarkers.GetTurnGuide(checkpoints, i, isCircuit, direction, vehicleType)
         end
     end
 

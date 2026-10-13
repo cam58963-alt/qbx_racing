@@ -948,6 +948,7 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
     local keyDelete = GetConfigValue('UI.creationKeybinds.deleteLastCheckpoint', 177) -- Backspace
     
     local isCircuit = raceCreationData.raceType ~= 'sprint'
+    local vehicleType = raceCreationData.vehicleType or 'car'
     local keyTurnLeft = GetConfigValue('UI.creationKeybinds.placeTurnLeft', 174)         -- ←
     local keyTurnRight = GetConfigValue('UI.creationKeybinds.placeTurnRight', 175)       -- →
     local keyDeleteTurn = GetConfigValue('UI.creationKeybinds.deleteLastTurnGuide', 178) -- Delete
@@ -1025,7 +1026,6 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
     end
     
     ShowCreationGuide()
-    RaceMarkers.SetVehicleType(raceCreationData.vehicleType or 'car')
     
     -- 作成モードのメインループ
     CreateThread(function()
@@ -1051,7 +1051,7 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
                 local isLatest = i == #checkpoints
                 
                 -- 自作マーカー（最新以外は薄く表示）、無効な場合は標準マーカー
-                if not RaceMarkers.Draw('checkpoint', cp, isLatest and 1.0 or 0.6) then
+                if not RaceMarkers.Draw('checkpoint', cp, isLatest and 1.0 or 0.6, vehicleType) then
                     local color = isLatest and {0, 255, 0} or {0, 150, 255}
                     
                     DrawMarker(
@@ -1072,8 +1072,8 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
             -- 曲がる方向を設定したチェックポイントの横に矢印を表示
             for i, cp in ipairs(checkpoints) do
                 if cp.turn then
-                    local guide = RaceMarkers.GetTurnGuide(checkpoints, i, isCircuit, cp.turn)
-                    RaceMarkers.Draw(guide.kind, guide)
+                    local guide = RaceMarkers.GetTurnGuide(checkpoints, i, isCircuit, cp.turn, vehicleType)
+                    RaceMarkers.Draw(guide.kind, guide, nil, vehicleType)
                     DrawLabel(guide.x, guide.y, guide.z + 1.5, cp.turn == 'left' and '←' or '→')
                 end
             end
