@@ -235,7 +235,14 @@ Config.Checkpoint = {
             auto = true,                         -- 自動ガイドを使うか
             manualOverridesAuto = true,          -- 手動ガイドがあるコースでは自動ガイドを出さない
             minAngle = 35.0,                     -- この角度（度）以上曲がる場所にだけ表示（自動）
-            distance = 12.0                      -- 自動ガイドをチェックポイントの中心からカーブの外側へ離す距離（メートル）
+            distance = 12.0,                     -- 自動ガイドをチェックポイントの中心からカーブの外側へ離す距離（メートル）
+            
+            -- 横に長いガイド（光の柱のない矢印 turn_strip_* を壁に沿う向きに並べる）
+            -- 手動: コース作成モードで置いた後に [↑] [↓] で長さを変更
+            autoLongAngle = 80.0,                -- 自動ガイドはこの角度（度）以上の急カーブで長くする（nil で無効）
+            autoLongSegments = 3,                -- 自動で長くするときの矢印の数
+            maxSegments = 8,                     -- 手動で並べられる矢印の最大数
+            segmentSpacing = 2.0                 -- 並べる間隔（メートル）
         },
         
         -- 用途別の画像（image はリソース内のパス、fxmanifest の files にも登録が必要）
@@ -269,6 +276,19 @@ Config.Checkpoint = {
                 image = 'html/img/markers/turn_right.png',
                 alpha = 240,
                 size = 8.0
+            },
+            -- 横に長いガイド用の矢印（光の柱なし、横に並べて使う）
+            turn_strip_left = {
+                image = 'html/img/markers/turn_strip_left.png',
+                alpha = 240,
+                size = 3.0,
+                groundAnchor = -0.3              -- 地面から少し浮かせる
+            },
+            turn_strip_right = {
+                image = 'html/img/markers/turn_strip_right.png',
+                alpha = 240,
+                size = 3.0,
+                groundAnchor = -0.3
             }
         },
         
@@ -278,6 +298,7 @@ Config.Checkpoint = {
             heli = {
                 centerOnPoint = true,            -- チェックポイントの位置を中心に表示（空中）
                 turnGuideDistance = 16.0,        -- 自動ガイドをリングの外側に出す（反応範囲の半径 + 余白）
+                turnGuideSegmentSpacing = 4.0,   -- 横に長いガイドの並べる間隔
                 
                 -- 反応範囲（空中なので半透明の球。チェックポイントからこの半径以内で通過）
                 radiusRing = {
@@ -332,6 +353,13 @@ Config.Checkpoint = {
                         image = 'html/img/markers/heli_turn_right.png',
                         alpha = 240,
                         size = 12.0
+                    },
+                    -- 横に長いガイド（画像は共通の turn_strip_* を使う）
+                    turn_strip_left = {
+                        size = 6.0
+                    },
+                    turn_strip_right = {
+                        size = 6.0
                     }
                 }
             }
@@ -552,7 +580,9 @@ Config.UI = {
         deleteLastCheckpoint = 177, -- Backspace
         placeTurnLeft = 174,       -- ← 左曲がりガイド設置
         placeTurnRight = 175,      -- → 右曲がりガイド設置
-        deleteLastTurnGuide = 178  -- Delete 最後のガイド削除
+        deleteLastTurnGuide = 178, -- Delete 最後のガイド削除
+        longerTurnGuide = 172,     -- ↑ 最後のガイドを横に長く
+        shorterTurnGuide = 173     -- ↓ 最後のガイドを短く
     },
     
     -- レース中キーバインド

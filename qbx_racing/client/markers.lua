@@ -315,8 +315,23 @@ local function GetNeighbors(checkpoints, index, isCircuit)
     return prev, nextCp
 end
 
+-- 長いガイドを並べる向き（CP index へ近づいてくる方向に対して横＝壁に沿う向き）
+-- 戻り値: axisX, axisY（求められない場合は nil）
+function RaceMarkers.GetGuideAxis(checkpoints, index, isCircuit)
+    local cp = checkpoints[index]
+    if not cp then return nil end
+
+    local prev, nextCp = GetNeighbors(checkpoints, index, isCircuit)
+    local dirX, dirY
+    if prev then dirX, dirY = Normalize2D(cp.x - prev.x, cp.y - prev.y) end
+    if not dirX and nextCp then dirX, dirY = Normalize2D(nextCp.x - cp.x, nextCp.y - cp.y) end
+    if not dirX then return nil end
+
+    return -dirY, dirX
+end
+
 -- 自動の曲がり角ガイド（コースの向きから判定し、カーブの外側に置く）
--- 戻り値: { kind = 'turn_left' / 'turn_right', x, y, z }（曲がらない場合は nil）
+-- 戻り値: { kind = 'turn_left' / 'turn_right', x, y, z, segments }（曲がらない場合は nil）
 local function GetAutoTurnGuide(checkpoints, index, isCircuit, vehicleType)
     local guide = markerConfig.turnGuide
     local cp = checkpoints[index]
@@ -346,11 +361,19 @@ local function GetAutoTurnGuide(checkpoints, index, isCircuit, vehicleType)
     end
 
     local distance = GetOption(GetSet(vehicleType), 'turnGuideDistance') or guide.distance or 12.0
+
+    -- 急なカーブは横に長いガイドにする
+    local segments = 1
+    if guide.autoLongAngle and math.abs(angle) >= math.rad(guide.autoLongAngle) then
+        segments = guide.autoLongSegments or 3
+    end
+
     return {
         kind = isLeft and 'turn_left' or 'turn_right',
         x = cp.x + sideX * distance,
         y = cp.y + sideY * distance,
-        z = cp.z
+        z = cp.z,
+        segments = segments
     }
 end
 
@@ -368,14 +391,15 @@ function RaceMarkers.FindNearestCheckpoint(checkpoints, pos)
 end
 
 -- 各チェックポイントの曲がり角ガイドを作る
--- manualGuides: 手動で置いたガイド（{ checkpoint_order, x, y, z, direction } のリスト）
--- 戻り値: turns[i] = { { kind, x, y, z }, ... }（CP i に向かっている間に表示）
+-- manualGuides: 手動で置いたガイド（{ checkpoint_order, x, y, z, direction, segments } のリスト）
+-- 戻り値: turns[i] = { { kind, x, y, z, segments, axisX, axisY }, ... }（CP i に向かっている間に表示）
 function RaceMarkers.BuildTurnGuides(checkpoints, isCircuit, manualGuides, vehicleType)
     local turns = {}
     local guide = markerConfig.turnGuide
     if not guide or not guide.enabled then return turns end
 
     local function Add(index, turnGuide)
+        turnGuide.axisX, turnGuide.axisY = RaceMarkers.GetGuideAxis(checkpoints, index, isCircuit)
         turns[index] = turns[index] or {}
         table.insert(turns[index], turnGuide)
     end
@@ -389,7 +413,8 @@ function RaceMarkers.BuildTurnGuides(checkpoints, isCircuit, manualGuides, vehic
                 kind = manual.direction == 'left' and 'turn_left' or 'turn_right',
                 x = manual.x,
                 y = manual.y,
-                z = manual.z
+                z = manual.z,
+                segments = tonumber(manual.segments) or 1
             })
             hasManual = true
         end
@@ -404,6 +429,32 @@ function RaceMarkers.BuildTurnGuides(checkpoints, isCircuit, manualGuides, vehic
     end
 
     return turns
+end
+
+-- 曲がり角ガイドを描画（segments が 2 以上なら、光の柱のない矢印を横に並べて長くする）
+-- guide: { kind, x, y, z, segments, axisX, axisY }
+function RaceMarkers.DrawTurnGuide(guide, vehicleType, alphaScale)
+    local segments = guide.segments or 1
+    if segments <= 1 or not guide.axisX then
+        return RaceMarkers.Draw(guide.kind, guide, alphaScale, vehicleType)
+    end
+
+    local stripKind = guide.kind == 'turn_left' and 'turn_strip_left' or 'turn_strip_right'
+    local spacing = GetOption(GetSet(vehicleType), 'turnGuideSegmentSpacing')
+        or (markerConfig.turnGuide and markerConfig.turnGuide.segmentSpacing) or 2.0
+
+    -- 置いた場所を中心に、壁に沿う向きへ並べる
+    local drawn = false
+    for i = 1, segments do
+        local offset = (i - (segments + 1) / 2) * spacing
+        local segment = {
+            x = guide.x + guide.axisX * offset,
+            y = guide.y + guide.axisY * offset,
+            z = guide.z
+        }
+        drawn = RaceMarkers.Draw(stripKind, segment, alphaScale, vehicleType) or drawn
+    end
+    return drawn
 end
 
 LoadMarkerTextures()

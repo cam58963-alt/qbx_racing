@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS `qbx_race_turn_guides` (
     `y` DOUBLE NOT NULL,
     `z` DOUBLE NOT NULL,
     `direction` ENUM('left', 'right') NOT NULL,
+    `segments` INT DEFAULT 1,
     FOREIGN KEY (`race_id`) REFERENCES `qbx_races`(`id`) ON DELETE CASCADE,
     INDEX `idx_race_guide` (`race_id`, `checkpoint_order`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -191,6 +192,9 @@ CALL qbx_racing_safe_add_column('qbx_race_sessions', 'house_cut', 'INT DEFAULT 0
 -- qbx_session_participants: 支払い・賞金関連カラム
 CALL qbx_racing_safe_add_column('qbx_session_participants', 'entry_paid', 'TINYINT(1) DEFAULT 0 AFTER `final_position`');
 CALL qbx_racing_safe_add_column('qbx_session_participants', 'prize_amount', 'INT DEFAULT 0 AFTER `entry_paid`');
+
+-- qbx_race_turn_guides: 横に長いガイド（並べる矢印の数）
+CALL qbx_racing_safe_add_column('qbx_race_turn_guides', 'segments', 'INT DEFAULT 1 AFTER `direction`');
 
 -- プロシージャ削除（後片付け）
 DROP PROCEDURE IF EXISTS `qbx_racing_safe_add_column`;

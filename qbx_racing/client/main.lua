@@ -953,6 +953,10 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
     local keyTurnLeft = GetConfigValue('UI.creationKeybinds.placeTurnLeft', 174)         -- ←
     local keyTurnRight = GetConfigValue('UI.creationKeybinds.placeTurnRight', 175)       -- →
     local keyDeleteTurn = GetConfigValue('UI.creationKeybinds.deleteLastTurnGuide', 178) -- Delete
+    local keyLongerTurn = GetConfigValue('UI.creationKeybinds.longerTurnGuide', 172)     -- ↑
+    local keyShorterTurn = GetConfigValue('UI.creationKeybinds.shorterTurnGuide', 173)   -- ↓
+    local maxSegments = GetConfigValue('Checkpoint.customMarker.turnGuide.maxSegments', 8)
+    local isCircuit = raceCreationData.raceType ~= 'sprint'
     
     DebugLog('Starting checkpoint mode for: ' .. raceCreationData.name)
     
@@ -965,6 +969,7 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
             .. '[ESC] 作成キャンセル<br>'
             .. '[Backspace] 最後のポイント削除<br><br>'
             .. '[←] [→] 今いる場所に曲がり角ガイド設置（左・右）<br>'
+            .. '[↑] [↓] 最後のガイドを横に長く・短く<br>'
             .. '[Delete] 最後のガイド削除<br><br>'
             .. '設置済み: <b>' .. #checkpoints .. '個</b> / ガイド: <b>' .. #turnGuides .. '個</b>',
         {
@@ -1010,7 +1015,8 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
             x = coords.x,
             y = coords.y,
             z = coords.z,
-            direction = direction
+            direction = direction,
+            segments = 1
         })
         
         ShowCreationGuide()
@@ -1020,6 +1026,18 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
             type = 'success'
         })
         PlaySoundFrontend(-1, 'CHECKPOINT_PERFECT', 'HUD_MINI_GAME_SOUNDSET', true)
+    end
+    
+    -- 最後に置いたガイドの長さ（並べる矢印の数）を変える
+    local function ResizeLastTurnGuide(delta)
+        local guide = turnGuides[#turnGuides]
+        if not guide then return end
+        
+        local segments = math.max(1, math.min(maxSegments, guide.segments + delta))
+        if segments == guide.segments then return end
+        
+        guide.segments = segments
+        PlaySoundFrontend(-1, 'NAV_UP_DOWN', 'HUD_FRONTEND_DEFAULT_SOUNDSET', true)
     end
     
     ShowCreationGuide()
@@ -1069,8 +1087,26 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
             -- 設置済み曲がり角ガイドを表示（どのCPに向かう時に出るかをラベル表示）
             for _, guide in ipairs(turnGuides) do
                 local arrow = guide.direction == 'left' and '←' or '→'
+                if guide.segments > 1 then
+                    arrow = arrow .. '×' .. guide.segments
+                end
+                
+                -- 長いガイドは紐づくCPへ近づく向きに対して横に並べる
                 local nearest = RaceMarkers.FindNearestCheckpoint(checkpoints, guide)
-                RaceMarkers.Draw(guide.direction == 'left' and 'turn_left' or 'turn_right', guide, nil, vehicleType)
+                local axisX, axisY = nil, nil
+                if nearest then
+                    axisX, axisY = RaceMarkers.GetGuideAxis(checkpoints, nearest, isCircuit)
+                end
+                
+                RaceMarkers.DrawTurnGuide({
+                    kind = guide.direction == 'left' and 'turn_left' or 'turn_right',
+                    x = guide.x,
+                    y = guide.y,
+                    z = guide.z,
+                    segments = guide.segments,
+                    axisX = axisX,
+                    axisY = axisY
+                }, vehicleType)
                 DrawLabel(guide.x, guide.y, guide.z + 1.5, nearest and string.format('%s CP%d', arrow, nearest) or arrow)
             end
             
@@ -1116,6 +1152,13 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
                 PlaceTurnGuide(coords, 'left')
             elseif IsControlJustPressed(0, keyTurnRight) then
                 PlaceTurnGuide(coords, 'right')
+            end
+            
+            -- ↑ / ↓: 最後のガイドを横に長く・短く
+            if IsControlJustPressed(0, keyLongerTurn) then
+                ResizeLastTurnGuide(1)
+            elseif IsControlJustPressed(0, keyShorterTurn) then
+                ResizeLastTurnGuide(-1)
             end
             
             -- Delete: 最後の曲がり角ガイド削除

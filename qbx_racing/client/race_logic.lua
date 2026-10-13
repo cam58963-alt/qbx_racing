@@ -1430,7 +1430,7 @@ local function DrawCustomRaceMarkers(turns, isCircuit, vehicleType)
     -- 曲がり角ガイド（このCPに向かっている間、ゴール以外）
     if not isFinish and turns[currentCheckpoint] then
         for _, turn in ipairs(turns[currentCheckpoint]) do
-            RaceMarkers.Draw(turn.kind, turn, nil, vehicleType)
+            RaceMarkers.DrawTurnGuide(turn, vehicleType)
         end
     end
     

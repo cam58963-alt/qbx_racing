@@ -59,7 +59,7 @@ end
 -- 曲がり角ガイド取得（手動設置分）
 local function GetRaceTurnGuides(raceId)
     return MySQL.query.await([[
-        SELECT checkpoint_order, x, y, z, direction FROM qbx_race_turn_guides 
+        SELECT checkpoint_order, x, y, z, direction, segments FROM qbx_race_turn_guides 
         WHERE race_id = ? ORDER BY id ASC
     ]], {raceId}) or {}
 end
@@ -369,11 +369,16 @@ RegisterNetEvent('qbx_racing:server:createRace', function(data)
                 and x and y and z
                 and (guide.direction == 'left' or guide.direction == 'right')
             
+            -- 横に並べる矢印の数（1 ～ maxSegments）
+            local maxSegments = GetConfigValue('Checkpoint.customMarker.turnGuide.maxSegments', 8)
+            local segments = math.tointeger(tonumber(guide.segments) or 1) or 1
+            segments = math.max(1, math.min(maxSegments, segments))
+            
             if isValid and savedGuides < maxTurnGuides then
                 MySQL.insert.await([[
-                    INSERT INTO qbx_race_turn_guides (race_id, checkpoint_order, x, y, z, direction) 
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ]], {raceId, order, x, y, z, guide.direction})
+                    INSERT INTO qbx_race_turn_guides (race_id, checkpoint_order, x, y, z, direction, segments) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ]], {raceId, order, x, y, z, guide.direction, segments})
                 savedGuides = savedGuides + 1
             end
             
@@ -1373,10 +1378,20 @@ AddEventHandler('onResourceStart', function(resourceName)
             `y` DOUBLE NOT NULL,
             `z` DOUBLE NOT NULL,
             `direction` ENUM('left', 'right') NOT NULL,
+            `segments` INT DEFAULT 1,
             FOREIGN KEY (`race_id`) REFERENCES `qbx_races`(`id`) ON DELETE CASCADE,
             INDEX `idx_race_guide` (`race_id`, `checkpoint_order`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     ]])
+    
+    -- 横に長いガイド用の列（このテーブルを先に作った既存サーバー向け）
+    local hasSegments = MySQL.scalar.await([[
+        SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'qbx_race_turn_guides' AND COLUMN_NAME = 'segments'
+    ]])
+    if tonumber(hasSegments) == 0 then
+        MySQL.query.await('ALTER TABLE `qbx_race_turn_guides` ADD COLUMN `segments` INT DEFAULT 1 AFTER `direction`')
+    end
     print('^2[QBX Racing]^7 マルチプレイヤーシステム: ' .. 
           (Config.Multiplayer and Config.Multiplayer.enabled and '有効' or '無効'))
     
