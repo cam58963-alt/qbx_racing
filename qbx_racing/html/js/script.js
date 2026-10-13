@@ -13,7 +13,8 @@ let isCurrentlyRacing = false;
 
 // タブレット (cam_tablet) のアプリとして開かれている場合はリソース名が入る
 // 例: nui://qbx_racing/html/index.html?tablet=cam_tablet
-const TABLET_RESOURCE = new URLSearchParams(location.search).get('tablet');
+const PAGE_PARAMS = new URLSearchParams(location.search);
+const TABLET_RESOURCE = PAGE_PARAMS.get('tablet');
 const IS_TABLET = !!TABLET_RESOURCE;
 
 // ===================================
@@ -51,6 +52,10 @@ function handleMessage(data) {
 // FiveM NUI API ヘルパー
 // ===================================
 function getResourceName() {
+    // タブレットのアプリとして開いた時はサーバーが URL に付けたリソース名を使う
+    if (PAGE_PARAMS.get('resource')) {
+        return PAGE_PARAMS.get('resource');
+    }
     if (typeof GetParentResourceName === 'function') {
         return GetParentResourceName();
     }

@@ -1381,7 +1381,9 @@ local function RegisterTabletApp()
     end
     app.id = app.id or 'racing'
     app.label = app.label or 'レーシング'
-    app.url = ('nui://%s/html/index.html?tablet=%s'):format(GetCurrentResourceName(), tabletResource)
+    -- 画面側が自分のリソース名（NUI コールバックの宛先）を確実に知れるよう resource も渡す
+    local resource = GetCurrentResourceName()
+    app.url = ('nui://%s/html/index.html?tablet=%s&resource=%s'):format(resource, tabletResource, resource)
     
     exports[tabletResource]:RegisterApp(app)
     print(('^2[QBX Racing]^7 タブレット (%s) にアプリ「%s」を登録しました'):format(tabletResource, app.label))
