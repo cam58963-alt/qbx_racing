@@ -277,7 +277,6 @@ Config.Checkpoint = {
             -- ヘリ: 空中でくぐるリング型
             heli = {
                 centerOnPoint = true,            -- チェックポイントの位置を中心に表示（空中）
-                sizeFromRadius = 2.5,            -- 画像の大きさ = 反応範囲の半径 × 2.5（リングの直径が反応範囲と一致）
                 turnGuideDistance = 16.0,        -- 自動ガイドをリングの外側に出す（反応範囲の半径 + 余白）
                 
                 -- 反応範囲（空中なので半透明の球。チェックポイントからこの半径以内で通過）
@@ -303,23 +302,23 @@ Config.Checkpoint = {
                     linkNext = false
                 },
                 
-                -- チェックポイントは球だけで表示（リング画像も使う場合は showImage = true）
+                -- チェックポイントは半透明の球（反応範囲）＋中心のひし形で表示（球だけにする場合は showImage = false）
                 styles = {
                     checkpoint = {
                         image = 'html/img/markers/heli_checkpoint.png',
-                        showImage = false,
+                        size = 5.0,
                         alpha = 230,
                         ringColor = {r = 120, g = 255, b = 0}
                     },
                     preview = {
                         image = 'html/img/markers/heli_preview.png',
-                        showImage = false,
+                        size = 3.5,
                         alpha = 150,
                         ringColor = {r = 0, g = 220, b = 255}
                     },
                     finish = {
                         image = 'html/img/markers/heli_finish.png',
-                        showImage = false,
+                        size = 6.0,
                         alpha = 240,
                         ringColor = {r = 255, g = 210, b = 0}
                     },
