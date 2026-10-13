@@ -159,7 +159,7 @@ Config.Checkpoint = {
     height = 5.0,               -- マーカーの高さ
     minCheckpoints = 3,         -- 最低必要なチェックポイント数
     maxCheckpoints = 50,        -- 最大チェックポイント数
-    maxTurnGuides = 50,         -- 手動設置できる曲がり角ガイドの最大数
+    maxTurnGuides = 50,         -- 保存できる曲がり角ガイド（手動で方向を設定したCP）の最大数
     
     -- 作成モード設定
     creationMode = {
@@ -209,15 +209,15 @@ Config.Checkpoint = {
             fadeStep = 0.2                       -- 1個先へ行くごとに薄くする割合
         },
         
-        -- 曲がり角ガイド（オレンジの矢印）
-        -- 自動: コースが曲がるチェックポイントの外側に表示
-        -- 手動: コース作成モードで [←] [→] を押した場所に表示
+        -- 曲がり角ガイド（オレンジの矢印、緑のチェックポイントの横・曲がる側に表示）
+        -- 自動: コースの向きから曲がるチェックポイントを判定
+        -- 手動: コース作成モードで最後に置いたポイントに [←] [→] で方向を設定
         turnGuide = {
             enabled = true,
             auto = true,                         -- 自動ガイドを使うか
-            manualOverridesAuto = true,          -- 手動ガイドがあるコースでは自動ガイドを出さない
-            minAngle = 35.0,                     -- この角度（度）以上曲がる場所にだけ表示
-            offset = 4.0                         -- チェックポイント半径からさらに外側へ離す距離（メートル）
+            manualOverridesAuto = true,          -- 手動で方向を設定したコースでは自動ガイドを出さない
+            minAngle = 35.0,                     -- この角度（度）以上曲がる場所にだけ表示（自動）
+            sideOffset = 6.0                     -- チェックポイントの中心から横へ離す距離（メートル）
         },
         
         -- 用途別の画像（image はリソース内のパス、fxmanifest の files にも登録が必要）
@@ -260,6 +260,7 @@ Config.Checkpoint = {
             heli = {
                 centerOnPoint = true,            -- チェックポイントの位置を中心に表示（空中）
                 sizeFromRadius = 2.5,            -- 画像の大きさ = 反応範囲の半径 × 2.5（リングの直径が反応範囲と一致）
+                turnGuideSideOffset = 16.0,      -- 矢印をリングの外側に出す（反応範囲の半径 + 余白）
                 
                 -- 反応範囲の丸（空中なので塗りなし、リングと同じ高さに水平の丸）
                 radiusRing = {
@@ -513,9 +514,9 @@ Config.UI = {
         finishCreation = 45,       -- R
         cancelCreation = 200,      -- ESC
         deleteLastCheckpoint = 177, -- Backspace
-        placeTurnLeft = 174,       -- ← 左曲がりガイド設置
-        placeTurnRight = 175,      -- → 右曲がりガイド設置
-        deleteLastTurnGuide = 178  -- Delete
+        placeTurnLeft = 174,       -- ← 最後のポイントを左曲がりに設定
+        placeTurnRight = 175,      -- → 最後のポイントを右曲がりに設定
+        deleteLastTurnGuide = 178  -- Delete 最後のポイントの曲がる方向を解除
     },
     
     -- レース中キーバインド

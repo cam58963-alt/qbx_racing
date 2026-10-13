@@ -354,7 +354,7 @@ RegisterNetEvent('qbx_racing:server:createRace', function(data)
             })
         end
         
-        -- 曲がり角ガイド保存（最後のCPの後に置いたものは、周回レースならCP1に紐づける）
+        -- 曲がり角ガイド保存（手動で曲がる方向を設定したチェックポイント）
         local checkpointCount = #data.checkpoints
         local maxTurnGuides = Config.Checkpoint and Config.Checkpoint.maxTurnGuides or 50
         local savedGuides = 0
@@ -363,9 +363,6 @@ RegisterNetEvent('qbx_racing:server:createRace', function(data)
             
             local order = tonumber(guide.checkpoint)
             order = order and math.tointeger(order)
-            if order == checkpointCount + 1 and data.raceType ~= 'sprint' then
-                order = 1
-            end
             
             local x, y, z = tonumber(guide.x), tonumber(guide.y), tonumber(guide.z)
             local isValid = order and order >= 1 and order <= checkpointCount

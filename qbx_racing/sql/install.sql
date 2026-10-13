@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS `qbx_race_checkpoints` (
     INDEX `idx_race_order` (`race_id`, `checkpoint_order`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 曲がり角ガイド（手動設置、checkpoint_order のCPに向かう間に表示）
+-- 曲がり角ガイド（checkpoint_order のCPに手動で設定した曲がる方向）
 CREATE TABLE IF NOT EXISTS `qbx_race_turn_guides` (
     `id` INT AUTO_INCREMENT PRIMARY KEY,
     `race_id` INT NOT NULL,

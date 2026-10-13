@@ -164,88 +164,93 @@ local function Normalize2D(x, y)
     return x / length, y / length
 end
 
--- 各チェックポイントの曲がり方向を計算
--- 戻り値: turns[i] = { kind = 'turn_left' / 'turn_right', x, y, z }（曲がらない場合は nil）
-function RaceMarkers.ComputeTurns(checkpoints, isCircuit)
+-- 前後のチェックポイント（周回レースは最初と最後をつなげる）
+local function GetNeighbors(checkpoints, index, isCircuit)
+    local total = #checkpoints
+    local prev = checkpoints[index - 1] or (isCircuit and checkpoints[total]) or nil
+    local nextCp = checkpoints[index + 1] or (isCircuit and checkpoints[1]) or nil
+    local cp = checkpoints[index]
+    if prev == cp then prev = nil end
+    if nextCp == cp then nextCp = nil end
+    return prev, nextCp
+end
+
+-- コースの向きから曲がる方向を判定（'left' / 'right' / nil）
+local function DetectTurnDirection(checkpoints, index, isCircuit)
+    local guide = markerConfig.turnGuide
+    local cp = checkpoints[index]
+    local prev, nextCp = GetNeighbors(checkpoints, index, isCircuit)
+    if not prev or not nextCp then return nil end
+
+    local inX, inY = Normalize2D(cp.x - prev.x, cp.y - prev.y)
+    local outX, outY = Normalize2D(nextCp.x - cp.x, nextCp.y - cp.y)
+    if not inX or not outX then return nil end
+
+    -- 符号付きの角度（正 = 左曲がり、負 = 右曲がり）
+    local cross = inX * outY - inY * outX
+    local dot = inX * outX + inY * outY
+    local angle = math.atan(cross, dot)
+
+    if math.abs(angle) < math.rad(guide.minAngle or 35.0) then return nil end
+    return angle > 0 and 'left' or 'right'
+end
+
+-- 曲がり角ガイドの表示情報（緑のチェックポイントの横、曲がる側に置く）
+-- 戻り値: { kind = 'turn_left' / 'turn_right', x, y, z }
+function RaceMarkers.GetTurnGuide(checkpoints, index, isCircuit, direction)
+    local cp = checkpoints[index]
+    local prev, nextCp = GetNeighbors(checkpoints, index, isCircuit)
+
+    -- 進入方向（最初のCPなどで前がなければ次のCPへの方向）
+    local dirX, dirY
+    if prev then dirX, dirY = Normalize2D(cp.x - prev.x, cp.y - prev.y) end
+    if not dirX and nextCp then dirX, dirY = Normalize2D(nextCp.x - cp.x, nextCp.y - cp.y) end
+
+    local isLeft = direction == 'left'
+    local guide = {kind = isLeft and 'turn_left' or 'turn_right', x = cp.x, y = cp.y, z = cp.z}
+    if not dirX then return guide end
+
+    -- 進行方向の左 = (-dirY, dirX)、右 = (dirY, -dirX)
+    local sideX, sideY = -dirY, dirX
+    if not isLeft then sideX, sideY = dirY, -dirX end
+
+    local offset = GetOption('turnGuideSideOffset')
+        or (markerConfig.turnGuide and markerConfig.turnGuide.sideOffset) or 6.0
+    guide.x = cp.x + sideX * offset
+    guide.y = cp.y + sideY * offset
+    return guide
+end
+
+-- 各チェックポイントの曲がり角ガイドを作る
+-- manualGuides: 手動で付けた方向（{ checkpoint_order, direction } のリスト）
+-- 戻り値: turns[i] = { kind, x, y, z }（曲がらない場合は nil）
+function RaceMarkers.BuildTurnGuides(checkpoints, isCircuit, manualGuides)
     local turns = {}
     local guide = markerConfig.turnGuide
-    if not guide or not guide.enabled or guide.auto == false then return turns end
+    if not guide or not guide.enabled then return turns end
 
-    local minAngle = math.rad(guide.minAngle or 35.0)
-    local total = #checkpoints
+    -- 手動で付けた方向
+    local manual = {}
+    local hasManual = false
+    for _, turnGuide in ipairs(manualGuides or {}) do
+        local order = tonumber(turnGuide.checkpoint_order)
+        if order and checkpoints[order] then
+            manual[order] = turnGuide.direction
+            hasManual = true
+        end
+    end
 
-    for i, cp in ipairs(checkpoints) do
-        -- 周回レースは最初と最後をつなげて判定
-        local prev = checkpoints[i - 1] or (isCircuit and checkpoints[total])
-        local nextCp = checkpoints[i + 1] or (isCircuit and checkpoints[1])
+    -- 手動がある場合は手動だけ（manualOverridesAuto = false なら自動も併用し、同じCPは手動を優先）
+    local useAuto = guide.auto ~= false and not (hasManual and guide.manualOverridesAuto ~= false)
 
-        if prev and nextCp and prev ~= cp and nextCp ~= cp then
-            local inX, inY = Normalize2D(cp.x - prev.x, cp.y - prev.y)
-            local outX, outY = Normalize2D(nextCp.x - cp.x, nextCp.y - cp.y)
-
-            if inX and outX then
-                -- 符号付きの角度（正 = 左曲がり、負 = 右曲がり）
-                local cross = inX * outY - inY * outX
-                local dot = inX * outX + inY * outY
-                local angle = math.atan(cross, dot)
-
-                if math.abs(angle) >= minAngle then
-                    local isLeft = angle > 0
-
-                    -- コーナーの外側にガイドを置く（進入と脱出の中間方向に対して垂直）
-                    local midX, midY = Normalize2D(inX + outX, inY + outY)
-                    midX, midY = midX or inX, midY or inY
-                    local sideX, sideY
-                    if isLeft then
-                        sideX, sideY = midY, -midX   -- 左曲がりの外側 = 右側
-                    else
-                        sideX, sideY = -midY, midX   -- 右曲がりの外側 = 左側
-                    end
-
-                    local distance = (cp.radius or 10.0) + (guide.offset or 4.0)
-                    turns[i] = {
-                        kind = isLeft and 'turn_left' or 'turn_right',
-                        x = cp.x + sideX * distance,
-                        y = cp.y + sideY * distance,
-                        z = cp.z
-                    }
-                end
-            end
+    for i = 1, #checkpoints do
+        local direction = manual[i] or (useAuto and DetectTurnDirection(checkpoints, i, isCircuit))
+        if direction then
+            turns[i] = RaceMarkers.GetTurnGuide(checkpoints, i, isCircuit, direction)
         end
     end
 
     return turns
-end
-
--- 手動設置の曲がり角ガイドをチェックポイントごとにまとめる
--- 戻り値: guides[i] = { { kind, x, y, z }, ... }、手動ガイドがあるか
-function RaceMarkers.GroupManualGuides(turnGuides)
-    local guides = {}
-    local hasAny = false
-    local guide = markerConfig.turnGuide
-    if not guide or not guide.enabled then return guides, hasAny end
-
-    for _, turnGuide in ipairs(turnGuides or {}) do
-        local order = tonumber(turnGuide.checkpoint_order)
-        if order then
-            guides[order] = guides[order] or {}
-            table.insert(guides[order], {
-                kind = turnGuide.direction == 'left' and 'turn_left' or 'turn_right',
-                x = turnGuide.x,
-                y = turnGuide.y,
-                z = turnGuide.z
-            })
-            hasAny = true
-        end
-    end
-
-    return guides, hasAny
-end
-
--- 手動ガイドがあるコースで自動ガイドを止めるか
-function RaceMarkers.ManualOverridesAuto()
-    local guide = markerConfig.turnGuide
-    return not guide or guide.manualOverridesAuto ~= false
 end
 
 LoadMarkerTextures()

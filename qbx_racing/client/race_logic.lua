@@ -1402,7 +1402,7 @@ function UpdateRaceCheckpoints()
 end
 
 -- 自作マーカー描画（次のCP・曲がり角ガイド・予告・ゴール）
-local function DrawCustomRaceMarkers(turns, manualGuides, isCircuit)
+local function DrawCustomRaceMarkers(turns, isCircuit)
     local total = #raceCheckpoints
     local totalLaps = isCircuit and (currentRace.laps or 1) or 1
     
@@ -1416,23 +1416,10 @@ local function DrawCustomRaceMarkers(turns, manualGuides, isCircuit)
     local isFinish = IsFinish(currentLap, currentCheckpoint)
     RaceMarkers.Draw(isFinish and 'finish' or 'checkpoint', cp)
     
-    -- 自動の曲がり角ガイド（ゴール以外）
+    -- 曲がり角ガイド（緑のチェックポイントの横、ゴール以外）
     local turn = not isFinish and turns[currentCheckpoint]
     if turn then
         RaceMarkers.Draw(turn.kind, turn)
-    end
-    
-    -- 手動の曲がり角ガイド（紐づいたCPか、その1つ前のCPに向かっている間に表示）
-    for ahead = 0, 1 do
-        local position = currentCheckpoint + ahead - 1
-        local lap = currentLap + math.floor(position / total)
-        local index = position % total + 1
-        
-        if lap <= totalLaps and manualGuides[index] then
-            for _, guide in ipairs(manualGuides[index]) do
-                RaceMarkers.Draw(guide.kind, guide)
-            end
-        end
     end
     
     -- 先のチェックポイントの予告（周回レースは次の周までつなげて表示）
@@ -1470,15 +1457,11 @@ function RaceDrawThread()
     -- 自作マーカーは毎フレーム描画
     RaceMarkers.SetVehicleType(currentRace.vehicle_type or 'car')
     local isCircuit = currentRace.race_type ~= 'sprint'
-    local manualGuides, hasManualGuides = RaceMarkers.GroupManualGuides(currentRace.turnGuides)
-    local turns = {}
-    if not (hasManualGuides and RaceMarkers.ManualOverridesAuto()) then
-        turns = RaceMarkers.ComputeTurns(raceCheckpoints, isCircuit)
-    end
+    local turns = RaceMarkers.BuildTurnGuides(raceCheckpoints, isCircuit, currentRace.turnGuides)
     
     while isRacing and currentRace do
         if currentCheckpoint <= #raceCheckpoints then
-            DrawCustomRaceMarkers(turns, manualGuides, isCircuit)
+            DrawCustomRaceMarkers(turns, isCircuit)
         end
         
         Wait(0)
