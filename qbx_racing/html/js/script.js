@@ -133,9 +133,19 @@ function closeRacingUI() {
 }
 
 // レース開始・ダイアログ表示などでゲーム画面に戻る時
-// （タブレットは Lua 側で閉じるので、ここでは何もしない）
+// タブレットは Lua 側で閉じるので画面はそのまま。閉じるまでの間に
+// 同じ操作が二重に送られないよう、しばらく受け付けない
+let isLeaving = false;
+let leavingTimer = null;
+
 function leaveRacingUI() {
-    if (IS_TABLET) return;
+    if (IS_TABLET) {
+        isLeaving = true;
+        clearTimeout(leavingTimer);
+        // タブレットが閉じなかった場合（エラー時など）に備えて自動で戻す
+        leavingTimer = setTimeout(() => { isLeaving = false; }, 3000);
+        return;
+    }
     closeRacingUI();
 }
 
@@ -584,7 +594,7 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // レース開始
     document.getElementById('start-race-btn').addEventListener('click', function() {
-        if (!selectedRaceId) return;
+        if (!selectedRaceId || isLeaving) return;
         
         nuiPost('startRace', { raceId: selectedRaceId });
         closeDetailModal();
@@ -593,6 +603,7 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // 新規レース作成
     document.getElementById('create-race-btn').addEventListener('click', function() {
+        if (isLeaving) return;
         nuiPost('createRace');
         leaveRacingUI();
     });
@@ -623,7 +634,7 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // マルチセッション作成（NUIを閉じてox_lib inputDialogへ遷移）
     document.getElementById('create-session-btn').addEventListener('click', function() {
-        if (!selectedRaceId) return;
+        if (!selectedRaceId || isLeaving) return;
         nuiPost('createSessionDialog', { raceId: selectedRaceId });
         closeDetailModal();
         leaveRacingUI();
@@ -631,7 +642,7 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // セッション参加（NUIを閉じてox_libコンテキストメニューへ遷移）
     document.getElementById('join-session-btn').addEventListener('click', function() {
-        if (!selectedRaceId) return;
+        if (!selectedRaceId || isLeaving) return;
         nuiPost('joinSessionList', { raceId: selectedRaceId });
         closeDetailModal();
         leaveRacingUI();
@@ -652,6 +663,7 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // レースキャンセルボタン（/race UI内）
     document.getElementById('cancel-race-btn').addEventListener('click', function() {
+        if (isLeaving) return;
         leaveRacingUI();
         nuiPost('retireRace');
     });
