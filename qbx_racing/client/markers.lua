@@ -31,6 +31,13 @@ local function LoadMarkerTextures()
     -- 乗り物ごとの画像はテクスチャ名を「乗り物_種類」にする（例: heli_checkpoint）
     -- 書いていない項目（画像を含む）は共通の styles で補う
     for vehicleType, set in pairs(markerConfig.vehicleTypes or {}) do
+        -- radiusRing / routeLine などの入れ子の設定も、書いていない項目は共通の設定で補う
+        for key, value in pairs(set) do
+            if key ~= 'styles' and type(value) == 'table' and type(markerConfig[key]) == 'table' then
+                setmetatable(value, {__index = markerConfig[key]})
+            end
+        end
+
         for kind, style in pairs(set.styles or {}) do
             local base = markerConfig.styles[kind]
             if base then setmetatable(style, {__index = base}) end
