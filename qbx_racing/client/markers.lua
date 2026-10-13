@@ -23,6 +23,11 @@ local function LoadMarkerTextures()
         CreateRuntimeTextureFromImage(txd, kind, style.image)
     end
 
+    -- ルート線の1区切り（白い画像に DrawMarker で色を付ける）
+    if markerConfig.routeLine and markerConfig.routeLine.image then
+        CreateRuntimeTextureFromImage(txd, 'route_dash', markerConfig.routeLine.image)
+    end
+
     -- 乗り物ごとの画像はテクスチャ名を「乗り物_種類」にする（例: heli_checkpoint）
     -- 書いていない項目（画像を含む）は共通の styles で補う
     for vehicleType, set in pairs(markerConfig.vehicleTypes or {}) do
@@ -77,6 +82,21 @@ local function DrawRangeCircle(set, pos, z, color, alpha)
 
     local diameter = pos.radius * 2
     local alphaRate = alpha / 255
+
+    -- 半透明の球（空中の反応範囲。チェックポイントからこの半径以内で通過判定）
+    if ring.sphere then
+        local sphereSize = pos.radius * (ring.sphereScale or 1.0)
+        DrawMarker(
+            28,
+            pos.x, pos.y, z,
+            0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0,
+            sphereSize, sphereSize, sphereSize,
+            color.r, color.g, color.b,
+            math.floor((ring.sphereAlpha or 50) * alphaRate),
+            false, false, 2, false, nil, nil, false
+        )
+    end
 
     -- 薄い塗り（円柱）
     if ring.fill ~= false then
@@ -152,6 +172,93 @@ function RaceMarkers.Draw(kind, pos, alphaScale, vehicleType)
     end
 
     return true
+end
+
+-- ===================================
+-- ルート線（自分の位置から次のチェックポイントまで）
+-- ===================================
+
+-- 区切りの位置は一定間隔でまとめて計算し、毎フレームは描画だけ行う
+local routeCache = {time = 0, target = nil, points = {}}
+
+-- 自分の位置から目標までの区切りの位置を計算
+local function BuildRoutePoints(from, target, route)
+    local points = {}
+    local dx, dy, dz = target.x - from.x, target.y - from.y, target.z - from.z
+    local total = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if total < 0.01 then return points end
+
+    -- チェックポイントの反応範囲の手前まで、最大 maxDistance まで
+    local length = math.min(total - (target.radius or 10.0) * 0.5, route.maxDistance or 60.0)
+    local spacing = route.spacing or 4.0
+    local heading = GetHeadingFromVector_2d(dx, dy)
+
+    local distance = route.startDistance or 4.0
+    while distance <= length do
+        local rate = distance / total
+        local x, y, z = from.x + dx * rate, from.y + dy * rate, from.z + dz * rate
+
+        if route.followGround ~= false then
+            -- 地面に沿わせる（見つからなければ足元の高さ）
+            local found, groundZ = GetGroundZFor_3dCoord(x, y, z + 3.0, false)
+            z = (found and groundZ or z - 1.0) + 0.05
+        end
+
+        table.insert(points, {
+            x = x, y = y, z = z,
+            heading = heading,
+            fade = 1.0 - (distance / math.max(length, 0.01)) * 0.7
+        })
+        distance = distance + spacing
+    end
+
+    return points
+end
+
+-- ルート線を描画
+-- from: 自分の位置、target: 次のチェックポイント、nextCp: その次（細い線でつなぐ、nil 可）
+-- targetKind: 目標の画像の種類（線の色を合わせる）
+function RaceMarkers.DrawRouteLine(from, target, nextCp, targetKind, vehicleType)
+    if not isTextureReady then return end
+
+    local set = GetSet(vehicleType)
+    local route = GetOption(set, 'routeLine')
+    if not route or not route.enabled then return end
+
+    local style = ResolveStyle(set, vehicleType, targetKind)
+    local color = route.color or (style and style.ringColor) or {r = 255, g = 255, b = 255}
+
+    local now = GetGameTimer()
+    if routeCache.target ~= target or now - routeCache.time >= (route.updateInterval or 100) then
+        routeCache.points = BuildRoutePoints(from, target, route)
+        routeCache.target = target
+        routeCache.time = now
+    end
+
+    local size = route.size or 3.0
+    local alpha = route.alpha or 200
+    for _, point in ipairs(routeCache.points) do
+        DrawMarker(
+            9,
+            point.x, point.y, point.z,
+            0.0, 0.0, 0.0,
+            0.0, 0.0, point.heading + (route.rotationOffset or 0.0),
+            size, size, size,
+            color.r, color.g, color.b, math.floor(alpha * point.fade),
+            false, false, 2, false,
+            markerConfig.textureDict, 'route_dash', false
+        )
+    end
+
+    -- 次のチェックポイントからその次へ細い線
+    if route.linkNext and nextCp then
+        local linkColor = route.linkColor or color
+        DrawLine(
+            target.x, target.y, target.z,
+            nextCp.x, nextCp.y, nextCp.z,
+            linkColor.r, linkColor.g, linkColor.b, route.linkAlpha or 150
+        )
+    end
 end
 
 -- 予告表示する個数

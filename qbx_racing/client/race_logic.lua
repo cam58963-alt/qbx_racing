@@ -1416,6 +1416,17 @@ local function DrawCustomRaceMarkers(turns, isCircuit, vehicleType)
     local isFinish = IsFinish(currentLap, currentCheckpoint)
     RaceMarkers.Draw(isFinish and 'finish' or 'checkpoint', cp, nil, vehicleType)
     
+    -- ルート線（自分の位置から次のCPまで。周回レースは次の周の最初のCPへもつなぐ）
+    local nextCp = nil
+    if not isFinish then
+        local nextLap = currentCheckpoint == total and currentLap + 1 or currentLap
+        if nextLap <= totalLaps then
+            nextCp = raceCheckpoints[currentCheckpoint % total + 1]
+        end
+    end
+    RaceMarkers.DrawRouteLine(GetEntityCoords(PlayerPedId()), cp, nextCp,
+        isFinish and 'finish' or 'checkpoint', vehicleType)
+    
     -- 曲がり角ガイド（このCPに向かっている間、ゴール以外）
     if not isFinish and turns[currentCheckpoint] then
         for _, turn in ipairs(turns[currentCheckpoint]) do

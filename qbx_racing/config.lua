@@ -209,6 +209,23 @@ Config.Checkpoint = {
             fadeStep = 0.2                       -- 1個先へ行くごとに薄くする割合
         },
         
+        -- ルート線（自分の位置から次のチェックポイントまで、まっすぐ光る線を並べる）
+        routeLine = {
+            enabled = true,
+            image = 'html/img/markers/route_dash.png',  -- 白い画像（色は color で付ける）
+            color = nil,                         -- 線の色（nil = 目標のマーカーの ringColor に合わせる）
+            alpha = 200,                         -- 透明度（0-255、遠いほど薄くなる）
+            size = 3.0,                          -- 1区切りの大きさ（メートル）
+            spacing = 4.0,                       -- 区切りの間隔（メートル）
+            startDistance = 4.0,                 -- 自分から何メートル先から表示するか
+            maxDistance = 60.0,                  -- 何メートル先まで表示するか
+            followGround = true,                 -- 地面に沿わせる
+            updateInterval = 100,                -- 位置の再計算の間隔（ミリ秒）
+            rotationOffset = 0.0,                -- 矢印の向きが進行方向とずれる場合に調整（例: 180.0 / 90.0）
+            linkNext = false,                    -- 次のチェックポイントからその次へ細い線を引く
+            linkAlpha = 150                      -- 細い線の透明度
+        },
+        
         -- 曲がり角ガイド（オレンジの矢印、そのチェックポイントに向かっている間に表示）
         -- 自動: コースの向きから曲がるチェックポイントを判定し、カーブの外側に表示
         -- 手動: コース作成モードで [←] [→] を押した場所に表示（一番近いチェックポイントに紐づく）
@@ -262,13 +279,31 @@ Config.Checkpoint = {
                 sizeFromRadius = 2.5,            -- 画像の大きさ = 反応範囲の半径 × 2.5（リングの直径が反応範囲と一致）
                 turnGuideDistance = 16.0,        -- 自動ガイドをリングの外側に出す（反応範囲の半径 + 余白）
                 
-                -- 反応範囲の丸（空中なので塗りなし、リングと同じ高さに水平の丸）
+                -- 反応範囲（空中なので半透明の球。チェックポイントからこの半径以内で通過）
                 radiusRing = {
                     enabled = true,
-                    outline = true,
-                    outlineType = 25,
-                    outlineAlpha = 160,
+                    sphere = true,
+                    sphereAlpha = 50,                -- 球の透明度（0-255）
+                    sphereScale = 1.0,               -- 球の大きさが反応範囲とずれる場合に調整
+                    outline = false,
                     fill = false
+                },
+                
+                -- ルート線（空中に並べる、次のチェックポイントへの細い線あり）
+                routeLine = {
+                    enabled = true,
+                    image = 'html/img/markers/route_dash.png',
+                    color = {r = 0, g = 220, b = 255},
+                    alpha = 220,
+                    size = 5.0,
+                    spacing = 6.0,
+                    startDistance = 8.0,
+                    maxDistance = 120.0,
+                    followGround = false,
+                    updateInterval = 100,
+                    rotationOffset = 0.0,
+                    linkNext = true,
+                    linkAlpha = 180
                 },
                 
                 styles = {
