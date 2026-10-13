@@ -50,6 +50,19 @@ CREATE TABLE IF NOT EXISTS `qbx_race_checkpoints` (
     INDEX `idx_race_order` (`race_id`, `checkpoint_order`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- 曲がり角ガイド（手動設置、checkpoint_order のCPに向かう間に表示）
+CREATE TABLE IF NOT EXISTS `qbx_race_turn_guides` (
+    `id` INT AUTO_INCREMENT PRIMARY KEY,
+    `race_id` INT NOT NULL,
+    `checkpoint_order` INT NOT NULL,
+    `x` DOUBLE NOT NULL,
+    `y` DOUBLE NOT NULL,
+    `z` DOUBLE NOT NULL,
+    `direction` ENUM('left', 'right') NOT NULL,
+    FOREIGN KEY (`race_id`) REFERENCES `qbx_races`(`id`) ON DELETE CASCADE,
+    INDEX `idx_race_guide` (`race_id`, `checkpoint_order`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- タイム記録
 CREATE TABLE IF NOT EXISTS `qbx_race_times` (
     `id` INT AUTO_INCREMENT PRIMARY KEY,

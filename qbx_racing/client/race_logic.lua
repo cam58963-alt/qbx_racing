@@ -1307,6 +1307,9 @@ end
 function UpdateRaceCheckpoints()
     -- 既存のチェックポイントエンティティを全削除して再生成
     ClearCheckpointEntities()
+    
+    -- 自作マーカー使用時は RaceDrawThread で毎フレーム描画するため生成しない
+    if RaceMarkers.IsEnabled() then return end
 
     if not currentRace or not isRacing then return end
 
@@ -1398,15 +1401,87 @@ function UpdateRaceCheckpoints()
     DebugLog('Checkpoints updated: current=' .. currentCheckpoint .. '/' .. totalCPs)
 end
 
--- レース中のチェックポイント監視スレッド（毎フレーム描画不要）
+-- 自作マーカー描画（次のCP・曲がり角ガイド・予告・ゴール）
+local function DrawCustomRaceMarkers(turns, manualGuides, isCircuit)
+    local total = #raceCheckpoints
+    local totalLaps = isCircuit and (currentRace.laps or 1) or 1
+    
+    -- 何周目の何番目かからゴールかどうか判定
+    local function IsFinish(lap, index)
+        return lap >= totalLaps and index == total
+    end
+    
+    -- 次に通過するチェックポイント
+    local cp = raceCheckpoints[currentCheckpoint]
+    local isFinish = IsFinish(currentLap, currentCheckpoint)
+    RaceMarkers.Draw(isFinish and 'finish' or 'checkpoint', cp)
+    
+    -- 自動の曲がり角ガイド（ゴール以外）
+    local turn = not isFinish and turns[currentCheckpoint]
+    if turn then
+        RaceMarkers.Draw(turn.kind, turn)
+    end
+    
+    -- 手動の曲がり角ガイド（紐づいたCPか、その1つ前のCPに向かっている間に表示）
+    for ahead = 0, 1 do
+        local position = currentCheckpoint + ahead - 1
+        local lap = currentLap + math.floor(position / total)
+        local index = position % total + 1
+        
+        if lap <= totalLaps and manualGuides[index] then
+            for _, guide in ipairs(manualGuides[index]) do
+                RaceMarkers.Draw(guide.kind, guide)
+            end
+        end
+    end
+    
+    -- 先のチェックポイントの予告（周回レースは次の周までつなげて表示）
+    for ahead = 1, RaceMarkers.GetPreviewCount() do
+        local position = currentCheckpoint + ahead - 1
+        local lap = currentLap + math.floor(position / total)
+        local index = position % total + 1
+        
+        -- 一周しても足りない短いコースでは今のCPまで戻らないように止める
+        if lap > totalLaps or ahead >= total then break end
+        
+        local previewCp = raceCheckpoints[index]
+        local alpha = RaceMarkers.GetPreviewAlpha(ahead)
+        if IsFinish(lap, index) then
+            RaceMarkers.Draw('finish', previewCp, alpha * 0.5)
+        else
+            RaceMarkers.Draw('preview', previewCp, alpha)
+        end
+    end
+end
+
+-- レース中のチェックポイント描画スレッド
 function RaceDrawThread()
     -- 初回表示
     UpdateRaceCheckpoints()
 
-    -- チェックポイント更新は進行処理（SoloRaceProgressThread / MultiplayerRaceProgressThread）
-    -- 内でCP通過時に UpdateRaceCheckpoints() を呼び出すため、
-    -- ここでは何もしない（DrawMarkerと違い毎フレーム描画不要）
-    DebugLog('RaceDrawThread: checkpoint entities created (no per-frame draw needed)')
+    -- 標準チェックポイント（CreateCheckpoint）の場合、CP通過時に進行処理
+    -- （SoloRaceProgressThread / MultiplayerRaceProgressThread）が UpdateRaceCheckpoints() を
+    -- 呼び出すため、ここでは何もしない
+    if not RaceMarkers.IsEnabled() then
+        DebugLog('RaceDrawThread: checkpoint entities created (no per-frame draw needed)')
+        return
+    end
+
+    -- 自作マーカーは毎フレーム描画
+    local isCircuit = currentRace.race_type ~= 'sprint'
+    local manualGuides, hasManualGuides = RaceMarkers.GroupManualGuides(currentRace.turnGuides)
+    local turns = {}
+    if not (hasManualGuides and RaceMarkers.ManualOverridesAuto()) then
+        turns = RaceMarkers.ComputeTurns(raceCheckpoints, isCircuit)
+    end
+    
+    while isRacing and currentRace do
+        if currentCheckpoint <= #raceCheckpoints then
+            DrawCustomRaceMarkers(turns, manualGuides, isCircuit)
+        end
+        
+        Wait(0)
+    end
 end
 
 -- ===================================

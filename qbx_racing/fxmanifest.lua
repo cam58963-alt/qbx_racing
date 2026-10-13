@@ -18,6 +18,7 @@ server_scripts {
 }
 
 client_scripts {
+    'client/markers.lua',
     'client/main.lua',
     'client/race_logic.lua'
 }
@@ -27,7 +28,8 @@ ui_page 'html/index.html'
 files {
     'html/index.html',
     'html/css/style.css',
-    'html/js/script.js'
+    'html/js/script.js',
+    'html/img/markers/*.png'
 }
 
 dependencies {

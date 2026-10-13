@@ -159,6 +159,7 @@ Config.Checkpoint = {
     height = 5.0,               -- マーカーの高さ
     minCheckpoints = 3,         -- 最低必要なチェックポイント数
     maxCheckpoints = 50,        -- 最大チェックポイント数
+    maxTurnGuides = 50,         -- 手動設置できる曲がり角ガイドの最大数
     
     -- 作成モード設定
     creationMode = {
@@ -178,6 +179,75 @@ Config.Checkpoint = {
         finishColor = 38,        -- ゴールの色（オレンジ）
         passedColor = 2,         -- 通過済みの色（緑）
         showNumbers = true       -- 番号表示
+    },
+    
+    -- 自作マーカー（画像）設定
+    -- html/img/markers/ の画像をマーカーとして表示（enabled = false で VehicleTypes.*.checkpoint の標準チェックポイントに戻る）
+    customMarker = {
+        enabled = true,
+        textureDict = 'qbx_racing_markers',      -- ランタイムテクスチャ辞書名
+        size = 12.0,                             -- 画像の大きさ（メートル）
+        groundAnchor = 0.12,                     -- 画像の下端から地面リングまでの割合（0.0 = 画像の下端を地面に合わせる）
+        rotation = vector3(90.0, 0.0, 0.0),      -- 画像が横倒し・逆さまに見える場合はここを調整
+        faceCamera = true,                       -- 常にカメラの方を向ける
+        
+        -- 判定範囲を示す薄いリング
+        radiusRing = {
+            enabled = true,
+            height = 0.6,                        -- リングの高さ
+            alpha = 60                           -- リングの透明度（0-255）
+        },
+        
+        -- 先のチェックポイントの予告表示
+        preview = {
+            enabled = true,
+            count = 4,                           -- 何個先まで表示するか
+            fadeStep = 0.2                       -- 1個先へ行くごとに薄くする割合
+        },
+        
+        -- 曲がり角ガイド（オレンジの矢印）
+        -- 自動: コースが曲がるチェックポイントの外側に表示
+        -- 手動: コース作成モードで [←] [→] を押した場所に表示
+        turnGuide = {
+            enabled = true,
+            auto = true,                         -- 自動ガイドを使うか
+            manualOverridesAuto = true,          -- 手動ガイドがあるコースでは自動ガイドを出さない
+            minAngle = 35.0,                     -- この角度（度）以上曲がる場所にだけ表示
+            offset = 4.0                         -- チェックポイント半径からさらに外側へ離す距離（メートル）
+        },
+        
+        -- 用途別の画像（image はリソース内のパス、fxmanifest の files にも登録が必要）
+        styles = {
+            -- 次に通過するチェックポイント（コース作成モードの設置済みポイントにも使用）
+            checkpoint = {
+                image = 'html/img/markers/checkpoint.png',
+                alpha = 230,
+                ringColor = {r = 120, g = 255, b = 0}
+            },
+            -- 先のチェックポイントの予告
+            preview = {
+                image = 'html/img/markers/preview.png',
+                alpha = 150,
+                size = 10.0
+            },
+            -- ゴール（最終周の最後のチェックポイント）
+            finish = {
+                image = 'html/img/markers/finish.png',
+                alpha = 240,
+                ringColor = {r = 255, g = 210, b = 0}
+            },
+            -- 曲がり角ガイド（左・右）
+            turn_left = {
+                image = 'html/img/markers/turn_left.png',
+                alpha = 240,
+                size = 8.0
+            },
+            turn_right = {
+                image = 'html/img/markers/turn_right.png',
+                alpha = 240,
+                size = 8.0
+            }
+        }
     }
 }
 
@@ -391,7 +461,10 @@ Config.UI = {
         placeCheckpoint = 38,      -- E
         finishCreation = 45,       -- R
         cancelCreation = 200,      -- ESC
-        deleteLastCheckpoint = 177 -- Backspace
+        deleteLastCheckpoint = 177, -- Backspace
+        placeTurnLeft = 174,       -- ← 左曲がりガイド設置
+        placeTurnRight = 175,      -- → 右曲がりガイド設置
+        deleteLastTurnGuide = 178  -- Delete
     },
     
     -- レース中キーバインド
