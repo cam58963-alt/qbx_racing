@@ -12,6 +12,12 @@ local isTextureReady = false
 local function LoadMarkerTextures()
     if not markerConfig.enabled or not markerConfig.styles then return end
 
+    -- 次のCPとゴールの画像がないと表示が消えるため、標準チェックポイントに戻す
+    if not markerConfig.styles.checkpoint or not markerConfig.styles.finish then
+        print('^3[QBX Racing]^7 customMarker.styles に checkpoint / finish がないため、標準チェックポイントを使用します')
+        return
+    end
+
     local txd = CreateRuntimeTxd(markerConfig.textureDict)
     for kind, style in pairs(markerConfig.styles) do
         CreateRuntimeTextureFromImage(txd, kind, style.image)
