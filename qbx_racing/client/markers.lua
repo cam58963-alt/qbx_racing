@@ -46,6 +46,11 @@ local function LoadMarkerTextures()
                 CreateRuntimeTextureFromImage(txd, vehicleType .. '_' .. kind, style.image)
             end
         end
+
+        -- 乗り物ごとのルート線の画像
+        if type(set.routeLine) == 'table' and rawget(set.routeLine, 'image') then
+            CreateRuntimeTextureFromImage(txd, vehicleType .. '_route_dash', set.routeLine.image)
+        end
     end
 
     isTextureReady = true
@@ -258,6 +263,12 @@ function RaceMarkers.DrawRouteLine(playerPos, target, nextCp, targetKind, vehicl
         routeCache.time = now
     end
 
+    -- 乗り物ごとの画像があればそれを、なければ共通の画像を使う
+    local textureName = 'route_dash'
+    if set and type(set.routeLine) == 'table' and rawget(set.routeLine, 'image') then
+        textureName = vehicleType .. '_route_dash'
+    end
+
     local size = route.size or 3.0
     local alpha = route.alpha or 200
     for _, point in ipairs(routeCache.points) do
@@ -269,7 +280,7 @@ function RaceMarkers.DrawRouteLine(playerPos, target, nextCp, targetKind, vehicl
             size, size, size,
             color.r, color.g, color.b, math.floor(alpha * point.fade),
             false, false, 2, false,
-            markerConfig.textureDict, 'route_dash', false
+            markerConfig.textureDict, textureName, false
         )
     end
 
@@ -453,6 +464,11 @@ function RaceMarkers.DrawTurnGuide(guide, vehicleType, alphaScale)
             z = guide.z
         }
         drawn = RaceMarkers.Draw(stripKind, segment, alphaScale, vehicleType) or drawn
+    end
+
+    -- 長いガイド用の画像（turn_strip_*）がない設定なら、通常の矢印1つで表示する
+    if not drawn then
+        return RaceMarkers.Draw(guide.kind, guide, alphaScale, vehicleType)
     end
     return drawn
 end
