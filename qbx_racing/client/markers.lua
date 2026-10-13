@@ -8,6 +8,10 @@ RaceMarkers = {}
 local markerConfig = Config.Checkpoint and Config.Checkpoint.customMarker or {}
 local isTextureReady = false
 
+-- 乗り物ごとの画像セット（vehicleTypes にない乗り物は共通の styles を使う）
+local activeVehicleType = nil
+local activeSet = nil
+
 -- 画像をランタイムテクスチャとして登録（.ytd不要、PNGをそのまま使用）
 local function LoadMarkerTextures()
     if not markerConfig.enabled or not markerConfig.styles then return end
@@ -23,6 +27,13 @@ local function LoadMarkerTextures()
         CreateRuntimeTextureFromImage(txd, kind, style.image)
     end
 
+    -- 乗り物ごとの画像はテクスチャ名を「乗り物_種類」にする（例: heli_checkpoint）
+    for vehicleType, set in pairs(markerConfig.vehicleTypes or {}) do
+        for kind, style in pairs(set.styles or {}) do
+            CreateRuntimeTextureFromImage(txd, vehicleType .. '_' .. kind, style.image)
+        end
+    end
+
     isTextureReady = true
 end
 
@@ -31,47 +42,103 @@ function RaceMarkers.IsEnabled()
     return isTextureReady
 end
 
+-- 使う画像セットを乗り物の種類で切り替える（'car' / 'heli' / 'boat'）
+function RaceMarkers.SetVehicleType(vehicleType)
+    activeVehicleType = vehicleType
+    activeSet = vehicleType and markerConfig.vehicleTypes and markerConfig.vehicleTypes[vehicleType] or nil
+end
+
+-- 乗り物ごとの設定を優先して取得
+local function GetOption(key)
+    if activeSet and activeSet[key] ~= nil then return activeSet[key] end
+    return markerConfig[key]
+end
+
+-- 乗り物ごとの画像を優先し、なければ共通の画像を使う
+local function ResolveStyle(kind)
+    local styles = activeSet and activeSet.styles
+    if styles and styles[kind] then
+        return styles[kind], activeVehicleType .. '_' .. kind
+    end
+    return markerConfig.styles[kind], kind
+end
+
+-- 反応範囲の丸を描画
+local function DrawRangeCircle(pos, z, color, alpha)
+    local ring = GetOption('radiusRing')
+    if not ring or not ring.enabled then return end
+
+    local diameter = pos.radius * 2
+    local alphaRate = alpha / 255
+
+    -- 薄い塗り（円柱）
+    if ring.fill ~= false then
+        DrawMarker(
+            1,
+            pos.x, pos.y, z,
+            0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0,
+            diameter, diameter, ring.fillHeight or ring.height or 0.6,
+            color.r, color.g, color.b,
+            math.floor((ring.fillAlpha or ring.alpha or 40) * alphaRate),
+            false, false, 2, false, nil, nil, false
+        )
+    end
+
+    -- 輪郭線（水平の丸）
+    if ring.outline ~= false then
+        DrawMarker(
+            ring.outlineType or 25,
+            pos.x, pos.y, z + 0.05,
+            0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0,
+            diameter, diameter, 1.0,
+            color.r, color.g, color.b,
+            math.floor((ring.outlineAlpha or 200) * alphaRate),
+            false, false, 2, false, nil, nil, false
+        )
+    end
+end
+
 -- 自作マーカーを描画
 -- kind: styles のキー（'checkpoint' / 'preview' / 'finish' / 'turn_left' / 'turn_right'）
--- pos: x, y, z（radius があれば判定範囲リングも描画）
+-- pos: x, y, z（radius があれば反応範囲の丸も描画）
 -- 無効時・未設定時は false を返すので、呼び出し側で標準マーカーを描画する
 function RaceMarkers.Draw(kind, pos, alphaScale)
     if not isTextureReady then return false end
 
-    local style = markerConfig.styles[kind]
+    local style, textureName = ResolveStyle(kind)
     if not style then return false end
 
-    local size = style.size or markerConfig.size or 12.0
-    local anchor = style.groundAnchor or markerConfig.groundAnchor or 0.0
-    local rotation = markerConfig.rotation or vector3(90.0, 0.0, 0.0)
+    -- 大きさ: 画像ごとの size > 反応範囲に合わせる（sizeFromRadius） > 共通の size
+    local sizeFromRadius = style.sizeFromRadius or GetOption('sizeFromRadius')
+    local size = style.size
+        or (sizeFromRadius and pos.radius and pos.radius * sizeFromRadius)
+        or GetOption('size') or 12.0
+    local anchor = style.groundAnchor or GetOption('groundAnchor') or 0.0
+    local rotation = GetOption('rotation') or vector3(90.0, 0.0, 0.0)
     local alpha = math.floor((style.alpha or 255) * (alphaScale or 1.0))
     local groundZ = pos.z - 1.0
 
-    -- 画像の地面リング部分が地面に来るように中心の高さを調整
+    -- 空中のマーカー（ヘリ）はチェックポイントの位置を中心に、
+    -- 地上のマーカーは画像の地面リング部分が地面に来るように高さを調整
+    local isCentered = GetOption('centerOnPoint')
+    local markerZ = isCentered and pos.z or groundZ + size * (0.5 - anchor)
+
     DrawMarker(
         9,
-        pos.x, pos.y, groundZ + size * (0.5 - anchor),
+        pos.x, pos.y, markerZ,
         0.0, 0.0, 0.0,
         rotation.x, rotation.y, rotation.z,
         size, size, size,
         255, 255, 255, alpha,
-        false, markerConfig.faceCamera ~= false, 2, false,
-        markerConfig.textureDict, kind, false
+        false, GetOption('faceCamera') ~= false, 2, false,
+        markerConfig.textureDict, textureName, false
     )
 
-    -- 判定範囲を示す薄いリング
-    local ring = markerConfig.radiusRing
-    if ring and ring.enabled and style.ringColor and pos.radius then
-        DrawMarker(
-            1,
-            pos.x, pos.y, groundZ,
-            0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0,
-            pos.radius * 2, pos.radius * 2, ring.height or 0.6,
-            style.ringColor.r, style.ringColor.g, style.ringColor.b,
-            math.floor((ring.alpha or 60) * alpha / 255),
-            false, false, 2, false, nil, nil, false
-        )
+    -- 反応範囲の丸
+    if style.ringColor and pos.radius then
+        DrawRangeCircle(pos, isCentered and pos.z or groundZ, style.ringColor, alpha)
     end
 
     return true

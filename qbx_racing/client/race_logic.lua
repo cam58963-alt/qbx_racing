@@ -1468,6 +1468,7 @@ function RaceDrawThread()
     end
 
     -- 自作マーカーは毎フレーム描画
+    RaceMarkers.SetVehicleType(currentRace.vehicle_type or 'car')
     local isCircuit = currentRace.race_type ~= 'sprint'
     local manualGuides, hasManualGuides = RaceMarkers.GroupManualGuides(currentRace.turnGuides)
     local turns = {}

@@ -1024,6 +1024,7 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
     end
     
     ShowCreationGuide()
+    RaceMarkers.SetVehicleType(raceCreationData.vehicleType or 'car')
     
     -- 作成モードのメインループ
     CreateThread(function()

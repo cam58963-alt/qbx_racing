@@ -191,11 +191,15 @@ Config.Checkpoint = {
         rotation = vector3(90.0, 0.0, 0.0),      -- 画像が横倒し・逆さまに見える場合はここを調整
         faceCamera = true,                       -- 常にカメラの方を向ける
         
-        -- 判定範囲を示す薄いリング
+        -- 反応範囲の丸（ringColor がある画像に表示）
         radiusRing = {
             enabled = true,
-            height = 0.6,                        -- リングの高さ
-            alpha = 60                           -- リングの透明度（0-255）
+            outline = true,                      -- 輪郭線（地面に水平の丸）
+            outlineType = 25,                    -- 輪郭線のマーカータイプ（25 = 細い円）
+            outlineAlpha = 200,                  -- 輪郭線の透明度（0-255）
+            fill = true,                         -- 内側の薄い塗り
+            fillHeight = 0.6,                    -- 塗りの高さ
+            fillAlpha = 40                       -- 塗りの透明度（0-255）
         },
         
         -- 先のチェックポイントの予告表示
@@ -228,7 +232,8 @@ Config.Checkpoint = {
             preview = {
                 image = 'html/img/markers/preview.png',
                 alpha = 150,
-                size = 10.0
+                size = 10.0,
+                ringColor = {r = 0, g = 220, b = 255}
             },
             -- ゴール（最終周の最後のチェックポイント）
             finish = {
@@ -246,6 +251,52 @@ Config.Checkpoint = {
                 image = 'html/img/markers/turn_right.png',
                 alpha = 240,
                 size = 8.0
+            }
+        },
+        
+        -- 乗り物ごとの画像セット（ここにない設定・画像は上の共通設定を使う）
+        vehicleTypes = {
+            -- ヘリ: 空中でくぐるリング型
+            heli = {
+                centerOnPoint = true,            -- チェックポイントの位置を中心に表示（空中）
+                sizeFromRadius = 2.5,            -- 画像の大きさ = 反応範囲の半径 × 2.5（リングの直径が反応範囲と一致）
+                
+                -- 反応範囲の丸（空中なので塗りなし、リングと同じ高さに水平の丸）
+                radiusRing = {
+                    enabled = true,
+                    outline = true,
+                    outlineType = 25,
+                    outlineAlpha = 160,
+                    fill = false
+                },
+                
+                styles = {
+                    checkpoint = {
+                        image = 'html/img/markers/heli_checkpoint.png',
+                        alpha = 230,
+                        ringColor = {r = 120, g = 255, b = 0}
+                    },
+                    preview = {
+                        image = 'html/img/markers/heli_preview.png',
+                        alpha = 150,
+                        ringColor = {r = 0, g = 220, b = 255}
+                    },
+                    finish = {
+                        image = 'html/img/markers/heli_finish.png',
+                        alpha = 240,
+                        ringColor = {r = 255, g = 210, b = 0}
+                    },
+                    turn_left = {
+                        image = 'html/img/markers/heli_turn_left.png',
+                        alpha = 240,
+                        size = 12.0
+                    },
+                    turn_right = {
+                        image = 'html/img/markers/heli_turn_right.png',
+                        alpha = 240,
+                        size = 12.0
+                    }
+                }
             }
         }
     }
