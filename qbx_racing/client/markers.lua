@@ -24,9 +24,15 @@ local function LoadMarkerTextures()
     end
 
     -- 乗り物ごとの画像はテクスチャ名を「乗り物_種類」にする（例: heli_checkpoint）
+    -- 書いていない項目（画像を含む）は共通の styles で補う
     for vehicleType, set in pairs(markerConfig.vehicleTypes or {}) do
         for kind, style in pairs(set.styles or {}) do
-            CreateRuntimeTextureFromImage(txd, vehicleType .. '_' .. kind, style.image)
+            local base = markerConfig.styles[kind]
+            if base then setmetatable(style, {__index = base}) end
+
+            if rawget(style, 'image') then
+                CreateRuntimeTextureFromImage(txd, vehicleType .. '_' .. kind, style.image)
+            end
         end
     end
 
@@ -52,9 +58,14 @@ end
 
 -- 乗り物ごとの画像を優先し、なければ共通の画像を使う
 local function ResolveStyle(set, vehicleType, kind)
-    local styles = set and set.styles
-    if styles and styles[kind] then
-        return styles[kind], vehicleType .. '_' .. kind
+    local style = set and set.styles and set.styles[kind]
+    if style then
+        -- 自分の画像があればそれを、なければ共通の画像（テクスチャ）を使う
+        if rawget(style, 'image') then
+            return style, vehicleType .. '_' .. kind
+        elseif markerConfig.styles[kind] then
+            return style, kind
+        end
     end
     return markerConfig.styles[kind], kind
 end
@@ -108,10 +119,11 @@ function RaceMarkers.Draw(kind, pos, alphaScale, vehicleType)
     local style, textureName = ResolveStyle(set, vehicleType, kind)
     if not style then return false end
 
-    -- 大きさ: 画像ごとの size > 反応範囲に合わせる（sizeFromRadius） > 共通の size
+    -- 大きさ: この画像に書いた size > 反応範囲に合わせる（sizeFromRadius） > 共通の画像の size > 全体の size
     local sizeFromRadius = style.sizeFromRadius or GetOption(set, 'sizeFromRadius')
-    local size = style.size
+    local size = rawget(style, 'size')
         or (sizeFromRadius and pos.radius and pos.radius * sizeFromRadius)
+        or style.size
         or GetOption(set, 'size') or 12.0
     local anchor = style.groundAnchor or GetOption(set, 'groundAnchor') or 0.0
     local rotation = GetOption(set, 'rotation') or vector3(90.0, 0.0, 0.0)
