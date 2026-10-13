@@ -1416,10 +1416,11 @@ local function DrawCustomRaceMarkers(turns, isCircuit, vehicleType)
     local isFinish = IsFinish(currentLap, currentCheckpoint)
     RaceMarkers.Draw(isFinish and 'finish' or 'checkpoint', cp, nil, vehicleType)
     
-    -- 曲がり角ガイド（緑のチェックポイントの横、ゴール以外）
-    local turn = not isFinish and turns[currentCheckpoint]
-    if turn then
-        RaceMarkers.Draw(turn.kind, turn, nil, vehicleType)
+    -- 曲がり角ガイド（このCPに向かっている間、ゴール以外）
+    if not isFinish and turns[currentCheckpoint] then
+        for _, turn in ipairs(turns[currentCheckpoint]) do
+            RaceMarkers.Draw(turn.kind, turn, nil, vehicleType)
+        end
     end
     
     -- 先のチェックポイントの予告（周回レースは次の周までつなげて表示）

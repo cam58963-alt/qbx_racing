@@ -947,7 +947,8 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
     local keyCancel = GetConfigValue('UI.creationKeybinds.cancelCreation', 200)     -- ESC
     local keyDelete = GetConfigValue('UI.creationKeybinds.deleteLastCheckpoint', 177) -- Backspace
     
-    local isCircuit = raceCreationData.raceType ~= 'sprint'
+    local turnGuides = {}
+    local maxTurnGuides = GetConfigValue('Checkpoint.maxTurnGuides', 50)
     local vehicleType = raceCreationData.vehicleType or 'car'
     local keyTurnLeft = GetConfigValue('UI.creationKeybinds.placeTurnLeft', 174)         -- ←
     local keyTurnRight = GetConfigValue('UI.creationKeybinds.placeTurnRight', 175)       -- →
@@ -963,9 +964,9 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
             .. '[R] 作成完了（最低 ' .. minCheckpoints .. '個）<br>'
             .. '[ESC] 作成キャンセル<br>'
             .. '[Backspace] 最後のポイント削除<br><br>'
-            .. '[←] [→] 最後のポイントに曲がる方向を設定<br>'
-            .. '[Delete] 最後のポイントの曲がる方向を解除<br><br>'
-            .. '設置済み: <b>' .. #checkpoints .. '個</b>',
+            .. '[←] [→] 今いる場所に曲がり角ガイド設置（左・右）<br>'
+            .. '[Delete] 最後のガイド削除<br><br>'
+            .. '設置済み: <b>' .. #checkpoints .. '個</b> / ガイド: <b>' .. #turnGuides .. '個</b>',
         {
             position = "left-center",
             icon = 'map-marked-alt',
@@ -994,35 +995,31 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
         end
     end
     
-    -- 最後に設置したチェックポイントに曲がる方向を設定（nil で解除）
-    local function SetLatestTurn(direction)
-        local cp = checkpoints[#checkpoints]
-        if not cp then
+    -- 曲がり角ガイドを今いる場所に設置（保存時に一番近いチェックポイントに紐づける）
+    local function PlaceTurnGuide(coords, direction)
+        if #turnGuides >= maxTurnGuides then
             lib.notify({
                 title = 'エラー',
-                description = '先にチェックポイントを設置してください',
+                description = string.format('曲がり角ガイドは最大 %d 個までです', maxTurnGuides),
                 type = 'error'
             })
             return
         end
         
-        cp.turn = direction
+        table.insert(turnGuides, {
+            x = coords.x,
+            y = coords.y,
+            z = coords.z,
+            direction = direction
+        })
         
-        if direction then
-            lib.notify({
-                title = '曲がり角ガイド',
-                description = string.format('CP %d に%s曲がりの矢印を設定しました',
-                    #checkpoints, direction == 'left' and '左' or '右'),
-                type = 'success'
-            })
-            PlaySoundFrontend(-1, 'CHECKPOINT_PERFECT', 'HUD_MINI_GAME_SOUNDSET', true)
-        else
-            lib.notify({
-                title = '曲がり角ガイド',
-                description = string.format('CP %d の矢印を解除しました', #checkpoints),
-                type = 'inform'
-            })
-        end
+        ShowCreationGuide()
+        lib.notify({
+            title = '曲がり角ガイド設置',
+            description = string.format('%s曲がりの矢印を設置しました', direction == 'left' and '左' or '右'),
+            type = 'success'
+        })
+        PlaySoundFrontend(-1, 'CHECKPOINT_PERFECT', 'HUD_MINI_GAME_SOUNDSET', true)
     end
     
     ShowCreationGuide()
@@ -1069,13 +1066,12 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
                 DrawLabel(cp.x, cp.y, cp.z + 1.5, tostring(i))
             end
             
-            -- 曲がる方向を設定したチェックポイントの横に矢印を表示
-            for i, cp in ipairs(checkpoints) do
-                if cp.turn then
-                    local guide = RaceMarkers.GetTurnGuide(checkpoints, i, isCircuit, cp.turn, vehicleType)
-                    RaceMarkers.Draw(guide.kind, guide, nil, vehicleType)
-                    DrawLabel(guide.x, guide.y, guide.z + 1.5, cp.turn == 'left' and '←' or '→')
-                end
+            -- 設置済み曲がり角ガイドを表示（どのCPに向かう時に出るかをラベル表示）
+            for _, guide in ipairs(turnGuides) do
+                local arrow = guide.direction == 'left' and '←' or '→'
+                local nearest = RaceMarkers.FindNearestCheckpoint(checkpoints, guide)
+                RaceMarkers.Draw(guide.direction == 'left' and 'turn_left' or 'turn_right', guide, nil, vehicleType)
+                DrawLabel(guide.x, guide.y, guide.z + 1.5, nearest and string.format('%s CP%d', arrow, nearest) or arrow)
             end
             
             -- E: チェックポイント設置
@@ -1115,30 +1111,31 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
                 DebugLog('Checkpoint removed: ' .. #checkpoints)
             end
             
-            -- ← / →: 最後のポイントに曲がる方向を設定、Delete: 解除
+            -- ← / →: 曲がり角ガイド設置
             if IsControlJustPressed(0, keyTurnLeft) then
-                SetLatestTurn('left')
+                PlaceTurnGuide(coords, 'left')
             elseif IsControlJustPressed(0, keyTurnRight) then
-                SetLatestTurn('right')
-            elseif IsControlJustPressed(0, keyDeleteTurn) then
-                SetLatestTurn(nil)
+                PlaceTurnGuide(coords, 'right')
+            end
+            
+            -- Delete: 最後の曲がり角ガイド削除
+            if IsControlJustPressed(0, keyDeleteTurn) and #turnGuides > 0 then
+                table.remove(turnGuides)
+                ShowCreationGuide()
+                
+                lib.notify({
+                    title = '曲がり角ガイド削除',
+                    description = '最後のガイドを削除しました',
+                    type = 'inform'
+                })
             end
             
             -- R: 作成完了
             if IsControlJustPressed(0, keyFinish) then -- R
                 if #checkpoints >= minCheckpoints then
-                    -- 曲がる方向を設定したチェックポイントを曲がり角ガイドとして送る
-                    local turnGuides = {}
-                    for i, cp in ipairs(checkpoints) do
-                        if cp.turn then
-                            table.insert(turnGuides, {
-                                checkpoint = i,
-                                direction = cp.turn,
-                                x = cp.x,
-                                y = cp.y,
-                                z = cp.z
-                            })
-                        end
+                    -- 曲がり角ガイドを一番近いチェックポイントに紐づける
+                    for _, guide in ipairs(turnGuides) do
+                        guide.checkpoint = RaceMarkers.FindNearestCheckpoint(checkpoints, guide)
                     end
                     
                     -- サーバーにレース作成リクエスト送信

@@ -354,7 +354,7 @@ RegisterNetEvent('qbx_racing:server:createRace', function(data)
             })
         end
         
-        -- 曲がり角ガイド保存（手動で曲がる方向を設定したチェックポイント）
+        -- 曲がり角ガイド保存（手動設置分、checkpoint は一番近いチェックポイント）
         local checkpointCount = #data.checkpoints
         local maxTurnGuides = Config.Checkpoint and Config.Checkpoint.maxTurnGuides or 50
         local savedGuides = 0

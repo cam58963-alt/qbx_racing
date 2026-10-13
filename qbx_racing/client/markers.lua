@@ -173,8 +173,9 @@ local function GetNeighbors(checkpoints, index, isCircuit)
     return prev, nextCp
 end
 
--- コースの向きから曲がる方向を判定（'left' / 'right' / nil）
-local function DetectTurnDirection(checkpoints, index, isCircuit)
+-- 自動の曲がり角ガイド（コースの向きから判定し、カーブの外側に置く）
+-- 戻り値: { kind = 'turn_left' / 'turn_right', x, y, z }（曲がらない場合は nil）
+local function GetAutoTurnGuide(checkpoints, index, isCircuit, vehicleType)
     local guide = markerConfig.turnGuide
     local cp = checkpoints[index]
     local prev, nextCp = GetNeighbors(checkpoints, index, isCircuit)
@@ -188,63 +189,75 @@ local function DetectTurnDirection(checkpoints, index, isCircuit)
     local cross = inX * outY - inY * outX
     local dot = inX * outX + inY * outY
     local angle = math.atan(cross, dot)
-
     if math.abs(angle) < math.rad(guide.minAngle or 35.0) then return nil end
-    return angle > 0 and 'left' or 'right'
+
+    local isLeft = angle > 0
+
+    -- カーブの外側（進入と脱出の中間方向に対して垂直、曲がる方向の反対側）
+    local midX, midY = Normalize2D(inX + outX, inY + outY)
+    midX, midY = midX or inX, midY or inY
+    local sideX, sideY
+    if isLeft then
+        sideX, sideY = midY, -midX   -- 左曲がりの外側 = 右側
+    else
+        sideX, sideY = -midY, midX   -- 右曲がりの外側 = 左側
+    end
+
+    local distance = GetOption(GetSet(vehicleType), 'turnGuideDistance') or guide.distance or 12.0
+    return {
+        kind = isLeft and 'turn_left' or 'turn_right',
+        x = cp.x + sideX * distance,
+        y = cp.y + sideY * distance,
+        z = cp.z
+    }
 end
 
--- 曲がり角ガイドの表示情報（緑のチェックポイントの横、曲がる側に置く）
--- 戻り値: { kind = 'turn_left' / 'turn_right', x, y, z }
-function RaceMarkers.GetTurnGuide(checkpoints, index, isCircuit, direction, vehicleType)
-    local cp = checkpoints[index]
-    local prev, nextCp = GetNeighbors(checkpoints, index, isCircuit)
-
-    -- 進入方向（最初のCPなどで前がなければ次のCPへの方向）
-    local dirX, dirY
-    if prev then dirX, dirY = Normalize2D(cp.x - prev.x, cp.y - prev.y) end
-    if not dirX and nextCp then dirX, dirY = Normalize2D(nextCp.x - cp.x, nextCp.y - cp.y) end
-
-    local isLeft = direction == 'left'
-    local guide = {kind = isLeft and 'turn_left' or 'turn_right', x = cp.x, y = cp.y, z = cp.z}
-    if not dirX then return guide end
-
-    -- 進行方向の左 = (-dirY, dirX)、右 = (dirY, -dirX)
-    local sideX, sideY = -dirY, dirX
-    if not isLeft then sideX, sideY = dirY, -dirX end
-
-    local offset = GetOption(GetSet(vehicleType), 'turnGuideSideOffset')
-        or (markerConfig.turnGuide and markerConfig.turnGuide.sideOffset) or 6.0
-    guide.x = cp.x + sideX * offset
-    guide.y = cp.y + sideY * offset
-    return guide
+-- 一番近いチェックポイントの番号（手動ガイドの紐づけ先）
+function RaceMarkers.FindNearestCheckpoint(checkpoints, pos)
+    local nearestIndex, nearestDistance = nil, math.huge
+    for i, cp in ipairs(checkpoints) do
+        local dx, dy, dz = cp.x - pos.x, cp.y - pos.y, cp.z - pos.z
+        local distance = dx * dx + dy * dy + dz * dz
+        if distance < nearestDistance then
+            nearestIndex, nearestDistance = i, distance
+        end
+    end
+    return nearestIndex
 end
 
 -- 各チェックポイントの曲がり角ガイドを作る
--- manualGuides: 手動で付けた方向（{ checkpoint_order, direction } のリスト）
--- 戻り値: turns[i] = { kind, x, y, z }（曲がらない場合は nil）
+-- manualGuides: 手動で置いたガイド（{ checkpoint_order, x, y, z, direction } のリスト）
+-- 戻り値: turns[i] = { { kind, x, y, z }, ... }（CP i に向かっている間に表示）
 function RaceMarkers.BuildTurnGuides(checkpoints, isCircuit, manualGuides, vehicleType)
     local turns = {}
     local guide = markerConfig.turnGuide
     if not guide or not guide.enabled then return turns end
 
-    -- 手動で付けた方向
-    local manual = {}
+    local function Add(index, turnGuide)
+        turns[index] = turns[index] or {}
+        table.insert(turns[index], turnGuide)
+    end
+
+    -- 手動で置いたガイド（置いた場所に表示）
     local hasManual = false
-    for _, turnGuide in ipairs(manualGuides or {}) do
-        local order = tonumber(turnGuide.checkpoint_order)
+    for _, manual in ipairs(manualGuides or {}) do
+        local order = tonumber(manual.checkpoint_order)
         if order and checkpoints[order] then
-            manual[order] = turnGuide.direction
+            Add(order, {
+                kind = manual.direction == 'left' and 'turn_left' or 'turn_right',
+                x = manual.x,
+                y = manual.y,
+                z = manual.z
+            })
             hasManual = true
         end
     end
 
-    -- 手動がある場合は手動だけ（manualOverridesAuto = false なら自動も併用し、同じCPは手動を優先）
-    local useAuto = guide.auto ~= false and not (hasManual and guide.manualOverridesAuto ~= false)
-
-    for i = 1, #checkpoints do
-        local direction = manual[i] or (useAuto and DetectTurnDirection(checkpoints, i, isCircuit))
-        if direction then
-            turns[i] = RaceMarkers.GetTurnGuide(checkpoints, i, isCircuit, direction, vehicleType)
+    -- 自動ガイド（手動ガイドがあるコースでは manualOverridesAuto = false のときだけ併用）
+    if guide.auto ~= false and not (hasManual and guide.manualOverridesAuto ~= false) then
+        for i = 1, #checkpoints do
+            local autoGuide = GetAutoTurnGuide(checkpoints, i, isCircuit, vehicleType)
+            if autoGuide then Add(i, autoGuide) end
         end
     end
 
