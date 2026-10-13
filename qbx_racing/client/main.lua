@@ -82,40 +82,42 @@ AddEventHandler(GetTabletResource() .. ':client:closed', function()
     tabletAppOpen = false
 end)
 
--- 安全なNUIメッセージ送信（メニュー画面向け。タブレットモードではアプリへ送る）
+-- 安全なNUIメッセージ送信（実際に開いているメニュー画面へ送る）
+-- ※ タブレットが途中で起動・停止しても、開いた側の画面に届くようにモードではなく開閉状態で判断
 local function SafeSendNUIMessage(data)
-    if IsTabletMode() then
-        if tabletAppOpen then
-            exports[GetTabletResource()]:SendAppMessage(GetTabletAppId(), data)
-            DebugLog('Tablet app message sent: ' .. (data.action or 'unknown'))
-        end
-    elseif isUIOpen then
+    if isUIOpen then
         SendNUIMessage(data)
         DebugLog('NUI Message sent: ' .. (data.action or 'unknown'))
+    elseif tabletAppOpen and IsTabletMode() then
+        exports[GetTabletResource()]:SendAppMessage(GetTabletAppId(), data)
+        DebugLog('Tablet app message sent: ' .. (data.action or 'unknown'))
     end
 end
 
 -- メニュー画面を閉じる（レース開始・ダイアログ表示などゲーム画面に戻る時）
+-- 全画面メニューとタブレットのうち、開いている方を閉じる
 local function CloseMenuUI()
-    if IsTabletMode() then
-        local tablet = exports[GetTabletResource()]
-        if tablet:IsOpen() then tablet:Close() end
-        tabletAppOpen = false
-    else
+    if isUIOpen then
         isUIOpen = false
         SetNuiFocus(false, false)
     end
+    
+    if IsTabletMode() then
+        local tablet = exports[GetTabletResource()]
+        if tablet:IsOpen() then tablet:Close() end
+    end
+    tabletAppOpen = false
 end
 
 -- メニュー画面を開く
 local function OpenMenuUI()
-    if IsTabletMode() then
-        exports[GetTabletResource()]:OpenApp(GetTabletAppId())
+    if isUIOpen then
+        DebugLog('UI already open, ignoring')
         return
     end
     
-    if isUIOpen then
-        DebugLog('UI already open, ignoring')
+    if IsTabletMode() then
+        exports[GetTabletResource()]:OpenApp(GetTabletAppId())
         return
     end
     
