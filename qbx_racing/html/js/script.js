@@ -1,4 +1,5 @@
 // html/js/script.js
+// QBX Racing System - NUI Script v4.2.0
 
 let currentRaces = [];
 let filteredRaces = [];
@@ -7,8 +8,12 @@ let racesPerPage = 12;
 let selectedRaceId = null;
 let currentFilter = 'all';
 let searchQuery = '';
+let isAdmin = false;
+let isCurrentlyRacing = false;
 
+// ===================================
 // NUIメッセージ受信
+// ===================================
 window.addEventListener('message', function(event) {
     const data = event.data;
     
@@ -25,21 +30,63 @@ window.addEventListener('message', function(event) {
         case 'showDriverSetup':
             showDriverSetup();
             break;
+        case 'updateRaceHUD':
+            updateRaceHUD(data);
+            break;
     }
 });
 
-// UI開く
+// ===================================
+// FiveM NUI API ヘルパー
+// ===================================
+function getResourceName() {
+    if (typeof GetParentResourceName === 'function') {
+        return GetParentResourceName();
+    }
+    return 'qbx_racing';
+}
+
+function nuiPost(endpoint, data) {
+    return fetch(`https://${getResourceName()}/${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data || {})
+    }).then(res => res.json()).catch(err => {
+        console.error(`NUI POST ${endpoint} failed:`, err);
+        return null;
+    });
+}
+
+// ===================================
+// UI開閉
+// ===================================
 function openRacingUI(data) {
-    $('#racing-ui').fadeIn(300);
+    const ui = document.getElementById('racing-ui');
+    ui.style.display = 'flex';
+    ui.style.opacity = '0';
+    requestAnimationFrame(() => {
+        ui.style.transition = 'opacity 0.3s ease';
+        ui.style.opacity = '1';
+    });
     
     if (data.hasProfile) {
-        $('#current-driver-name').text(data.driverName);
-        $('#main-screen').show();
-        $('#driver-setup-modal').hide();
+        document.getElementById('current-driver-name').textContent = data.driverName;
+        document.getElementById('main-screen').style.display = 'flex';
+        document.getElementById('driver-setup-modal').style.display = 'none';
         
-        // 管理者権限チェック
-        if (data.isAdmin) {
-            $('#admin-controls').show();
+        isAdmin = data.isAdmin || false;
+        isCurrentlyRacing = data.isRacing || false;
+        
+        if (isAdmin) {
+            document.getElementById('admin-controls').style.display = 'block';
+        } else {
+            document.getElementById('admin-controls').style.display = 'none';
+        }
+        
+        // レース中ならキャンセルボタンを表示
+        const cancelControls = document.getElementById('race-cancel-controls');
+        if (cancelControls) {
+            cancelControls.style.display = isCurrentlyRacing ? 'flex' : 'none';
         }
         
         loadRaces();
@@ -48,37 +95,38 @@ function openRacingUI(data) {
     }
 }
 
-// UI閉じる
 function closeRacingUI() {
-    $('#racing-ui').fadeOut(300);
-    $.post(`https://${GetParentResourceName()}/closeUI`);
+    const ui = document.getElementById('racing-ui');
+    ui.style.transition = 'opacity 0.25s ease';
+    ui.style.opacity = '0';
+    setTimeout(() => {
+        ui.style.display = 'none';
+    }, 250);
+    nuiPost('closeUI');
 }
 
-// ドライバー登録画面表示
 function showDriverSetup() {
-    $('#main-screen').hide();
-    $('#driver-setup-modal').show();
+    document.getElementById('main-screen').style.display = 'none';
+    document.getElementById('driver-setup-modal').style.display = 'flex';
 }
 
+// ===================================
 // レース一覧読み込み
+// ===================================
 function loadRaces() {
-    $.post(`https://${GetParentResourceName()}/getRaces`, JSON.stringify({}))
-        .done(function(races) {
-            currentRaces = races || [];
-            filterAndDisplayRaces();
-        })
-        .fail(function() {
-            console.error('Failed to load races');
-        });
+    nuiPost('getRaces').then(races => {
+        currentRaces = races || [];
+        filterAndDisplayRaces();
+    });
 }
 
-// フィルタリングと表示
 function filterAndDisplayRaces() {
     filteredRaces = currentRaces.filter(race => {
         const typeMatch = currentFilter === 'all' || race.vehicle_type === currentFilter;
-        const searchMatch = !searchQuery || 
-            race.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-            (race.creator_driver_name && race.creator_driver_name.toLowerCase().includes(searchQuery.toLowerCase()));
+        const query = searchQuery.toLowerCase();
+        const searchMatch = !query || 
+            race.name.toLowerCase().includes(query) ||
+            (race.creator_driver_name && race.creator_driver_name.toLowerCase().includes(query));
         
         return typeMatch && searchMatch;
     });
@@ -88,152 +136,181 @@ function filterAndDisplayRaces() {
     updatePagination();
 }
 
+// ===================================
 // レース表示（グリッド）
+// ===================================
 function displayRaces() {
-    const grid = $('#race-grid');
-    grid.empty();
+    const grid = document.getElementById('race-grid');
+    grid.innerHTML = '';
     
     const startIndex = (currentPage - 1) * racesPerPage;
     const endIndex = Math.min(startIndex + racesPerPage, filteredRaces.length);
     const racesToShow = filteredRaces.slice(startIndex, endIndex);
     
     if (racesToShow.length === 0) {
-        grid.append(`
+        grid.innerHTML = `
             <div class="no-races">
-                <i class="fas fa-search"></i>
+                <i class="fas fa-flag-checkered"></i>
                 <p>レースが見つかりません</p>
+                <p class="hint">${currentRaces.length === 0 ? '管理者がレースを作成するとここに表示されます' : 'フィルター条件を変更してください'}</p>
             </div>
-        `);
+        `;
         return;
     }
     
     racesToShow.forEach(race => {
-        const vehicleConfig = getVehicleConfig(race.vehicle_type);
-        const bestTimeText = race.best_time ? 
-            formatTime(race.best_time) : 'タイムなし';
+        const vConfig = getVehicleConfig(race.vehicle_type);
+        const rConfig = getRaceTypeConfig(race.race_type);
+        const bestTimeText = race.best_time ? formatTime(race.best_time) : null;
         const bestHolderText = race.best_player || '';
         
-        const raceCard = $(`
-            <div class="race-card" data-race-id="${race.id}">
-                <div class="race-header">
-                    <div>
-                        <div class="race-name">${race.name}</div>
-                    </div>
+        const card = document.createElement('div');
+        card.className = 'race-card';
+        card.setAttribute('data-race-id', race.id);
+        
+        card.innerHTML = `
+            <div class="race-header">
+                <div class="race-name">${escapeHtml(race.name)}</div>
+                <div class="badge-group">
                     <div class="vehicle-badge ${race.vehicle_type}">
-                        <i class="${vehicleConfig.icon}"></i> ${vehicleConfig.label}
+                        <i class="${vConfig.icon}"></i> ${vConfig.label}
                     </div>
-                </div>
-                
-                <div class="race-stats">
-                    <div class="stat-row">
-                        <span>周回数:</span>
-                        <span class="stat-value">${race.laps}</span>
+                    <div class="race-type-badge ${race.race_type || 'circuit'}">
+                        <i class="${rConfig.icon}"></i> ${rConfig.label}
                     </div>
-                    <div class="stat-row">
-                        <span>作成者:</span>
-                        <span class="stat-value">${race.creator_driver_name || '不明'}</span>
-                    </div>
-                    <div class="stat-row">
-                        <span>参加回数:</span>
-                        <span class="stat-value">${race.total_attempts || 0}</span>
-                    </div>
-                </div>
-                
-                <div class="best-time">
-                    <div class="time">${bestTimeText}</div>
-                    ${bestHolderText ? `<div class="holder">by ${bestHolderText}</div>` : ''}
                 </div>
             </div>
-        `);
+            
+            <div class="race-stats">
+                <div class="stat-row">
+                    <span><i class="fas fa-redo"></i> 周回数</span>
+                    <span class="stat-value">${race.laps || 1}</span>
+                </div>
+                <div class="stat-row">
+                    <span><i class="fas fa-user"></i> 作成者</span>
+                    <span class="stat-value">${escapeHtml(race.creator_driver_name || '不明')}</span>
+                </div>
+                <div class="stat-row">
+                    <span><i class="fas fa-chart-line"></i> 参加回数</span>
+                    <span class="stat-value">${race.total_attempts || 0}</span>
+                </div>
+            </div>
+            
+            <div class="best-time">
+                ${bestTimeText 
+                    ? `<div class="time">${bestTimeText}</div>
+                       ${bestHolderText ? `<div class="holder">by ${escapeHtml(bestHolderText)}</div>` : ''}`
+                    : '<div class="no-record">タイム未記録</div>'
+                }
+            </div>
+        `;
         
-        raceCard.on('click', () => showRaceDetail(race.id));
-        grid.append(raceCard);
+        card.addEventListener('click', () => showRaceDetail(race.id));
+        grid.appendChild(card);
     });
 }
 
-// ページネーション更新
+// ===================================
+// ページネーション
+// ===================================
 function updatePagination() {
-    const totalPages = Math.ceil(filteredRaces.length / racesPerPage);
-    const pageNumbers = $('#page-numbers');
-    pageNumbers.empty();
+    const totalPages = Math.max(1, Math.ceil(filteredRaces.length / racesPerPage));
+    const pageNumbers = document.getElementById('page-numbers');
+    pageNumbers.innerHTML = '';
     
-    // 前へボタン
-    $('#prev-page').prop('disabled', currentPage === 1);
+    document.getElementById('prev-page').disabled = currentPage <= 1;
+    document.getElementById('next-page').disabled = currentPage >= totalPages;
     
-    // 次へボタン  
-    $('#next-page').prop('disabled', currentPage === totalPages);
+    const maxVisible = 5;
+    let startPage = Math.max(1, currentPage - Math.floor(maxVisible / 2));
+    let endPage = Math.min(totalPages, startPage + maxVisible - 1);
     
-    // ページ番号
-    const maxVisiblePages = 5;
-    let startPage = Math.max(1, currentPage - Math.floor(maxVisiblePages / 2));
-    let endPage = Math.min(totalPages, startPage + maxVisiblePages - 1);
-    
-    if (endPage - startPage + 1 < maxVisiblePages) {
-        startPage = Math.max(1, endPage - maxVisiblePages + 1);
+    if (endPage - startPage + 1 < maxVisible) {
+        startPage = Math.max(1, endPage - maxVisible + 1);
     }
     
     for (let i = startPage; i <= endPage; i++) {
-        const pageBtn = $(`
-            <button class="page-number ${i === currentPage ? 'active' : ''}" data-page="${i}">
-                ${i}
-            </button>
-        `);
-        pageBtn.on('click', () => goToPage(i));
-        pageNumbers.append(pageBtn);
+        const btn = document.createElement('button');
+        btn.className = `page-number${i === currentPage ? ' active' : ''}`;
+        btn.textContent = i;
+        btn.addEventListener('click', () => goToPage(i));
+        pageNumbers.appendChild(btn);
     }
 }
 
-// ページ移動
 function goToPage(page) {
     currentPage = page;
     displayRaces();
     updatePagination();
+    
+    // スクロールをトップに
+    const grid = document.getElementById('race-grid');
+    grid.scrollTop = 0;
 }
 
+// ===================================
 // レース詳細表示
+// ===================================
 function showRaceDetail(raceId) {
     selectedRaceId = raceId;
     const race = currentRaces.find(r => r.id === raceId);
-    
     if (!race) return;
     
-    const vehicleConfig = getVehicleConfig(race.vehicle_type);
+    const vConfig = getVehicleConfig(race.vehicle_type);
+    const rConfig = getRaceTypeConfig(race.race_type);
     
-    $('#detail-race-name').text(race.name);
-    $('#detail-vehicle-type').html(`<i class="${vehicleConfig.icon}"></i> ${vehicleConfig.label}`);
-    $('#detail-laps').text(race.laps);
-    $('#detail-creator').text(race.creator_driver_name || '不明');
-    $('#detail-attempts').text(race.total_attempts || 0);
+    document.getElementById('detail-race-name').textContent = race.name;
+    document.getElementById('detail-vehicle-type').innerHTML = `<i class="${vConfig.icon}"></i> ${vConfig.label}`;
+    document.getElementById('detail-race-type').innerHTML = `<i class="${rConfig.icon}"></i> ${rConfig.label}`;
+    document.getElementById('detail-laps').textContent = race.laps || 1;
+    document.getElementById('detail-creator').textContent = race.creator_driver_name || '不明';
+    document.getElementById('detail-attempts').textContent = race.total_attempts || 0;
     
-    // ランキング読み込み
+    // 管理者のみ削除ボタン表示
+    const deleteBtn = document.getElementById('delete-race-btn');
+    deleteBtn.style.display = isAdmin ? 'block' : 'none';
+    
     loadLeaderboard(raceId);
     
-    $('#race-detail-modal').fadeIn(200);
+    const modal = document.getElementById('race-detail-modal');
+    modal.style.display = 'flex';
+    modal.style.opacity = '0';
+    requestAnimationFrame(() => {
+        modal.style.transition = 'opacity 0.2s ease';
+        modal.style.opacity = '1';
+    });
 }
 
-// ランキング読み込み
+function closeDetailModal() {
+    const modal = document.getElementById('race-detail-modal');
+    modal.style.transition = 'opacity 0.2s ease';
+    modal.style.opacity = '0';
+    setTimeout(() => {
+        modal.style.display = 'none';
+    }, 200);
+    selectedRaceId = null;
+}
+
+// ===================================
+// ランキング
+// ===================================
 function loadLeaderboard(raceId) {
-    $.post(`https://${GetParentResourceName()}/getLeaderboard`, JSON.stringify({raceId: raceId}))
-        .done(function(leaderboard) {
-            displayLeaderboard(leaderboard || []);
-        })
-        .fail(function() {
-            console.error('Failed to load leaderboard');
-        });
+    nuiPost('getLeaderboard', { raceId: raceId }).then(leaderboard => {
+        displayLeaderboard(leaderboard || []);
+    });
 }
 
-// ランキング表示
 function displayLeaderboard(leaderboard) {
-    const list = $('#leaderboard-list');
-    list.empty();
+    const list = document.getElementById('leaderboard-list');
+    list.innerHTML = '';
     
     if (leaderboard.length === 0) {
-        list.append(`
+        list.innerHTML = `
             <div class="no-records">
                 <i class="fas fa-trophy"></i>
                 <p>まだ記録がありません</p>
             </div>
-        `);
+        `;
         return;
     }
     
@@ -243,153 +320,289 @@ function displayLeaderboard(leaderboard) {
         else if (index === 1) rankClass = 'silver'; 
         else if (index === 2) rankClass = 'bronze';
         
-        const item = $(`
-            <div class="leaderboard-item">
-                <div class="rank-badge ${rankClass}">${index + 1}</div>
-                <div class="driver-info-lb">
-                    <div class="driver-name-lb">${record.driver_name}</div>
-                    <div class="vehicle-model">${record.vehicle_model}</div>
-                </div>
-                <div class="time-display">${formatTime(record.time_ms)}</div>
+        const item = document.createElement('div');
+        item.className = 'leaderboard-item';
+        item.innerHTML = `
+            <div class="rank-badge ${rankClass}">${index + 1}</div>
+            <div class="driver-info-lb">
+                <div class="driver-name-lb">${escapeHtml(record.driver_name)}</div>
+                <div class="vehicle-model">${escapeHtml(record.vehicle_model || '')}</div>
             </div>
-        `);
+            <div class="time-display">${formatTime(record.time_ms)}</div>
+        `;
         
-        list.append(item);
+        list.appendChild(item);
     });
 }
 
-// 車両設定取得
+// ===================================
+// レース中HUDオーバーレイ
+// ===================================
+function updateRaceHUD(data) {
+    const hud = document.getElementById('race-hud');
+    if (!hud) return;
+    
+    if (!data.visible) {
+        hud.style.display = 'none';
+        return;
+    }
+    
+    hud.style.display = 'block';
+    
+    document.getElementById('hud-race-type').textContent = data.raceType || '';
+    document.getElementById('hud-time').textContent = (data.time || '0.00') + 's';
+    document.getElementById('hud-checkpoint').textContent = (data.checkpoint || 0) + ' / ' + (data.totalCheckpoints || 0);
+    document.getElementById('hud-lap').textContent = (data.lap || 1) + ' / ' + (data.totalLaps || 1);
+    
+    const posRow = document.getElementById('hud-position-row');
+    if (data.isMultiplayer && data.position != null) {
+        posRow.style.display = 'flex';
+        document.getElementById('hud-position').textContent = data.position + ' / ' + (data.totalParticipants || 1);
+    } else {
+        posRow.style.display = 'none';
+    }
+}
+
+// ===================================
+// ヘルパー関数
+// ===================================
 function getVehicleConfig(type) {
     const configs = {
-        car: { label: '自動車', icon: 'fas fa-car' },
+        car:  { label: '自動車',       icon: 'fas fa-car' },
         heli: { label: 'ヘリコプター', icon: 'fas fa-helicopter' },
-        boat: { label: 'ボート', icon: 'fas fa-ship' }
+        boat: { label: 'ボート',       icon: 'fas fa-ship' }
     };
     return configs[type] || configs.car;
 }
 
-//時間フォーマット
-function formatTime(ms) {
-    const seconds = (ms / 1000).toFixed(2);
-    return `${seconds}s`;
+function getRaceTypeConfig(type) {
+    const configs = {
+        circuit: { label: '周回',       icon: 'fas fa-redo' },
+        sprint:  { label: 'スプリント', icon: 'fas fa-bolt' }
+    };
+    return configs[type] || configs.circuit;
 }
 
-// ドライバーネーム検証
-function validateDriverName(name) {
-    if (!name || name.length < 3 || name.length > 20) {
-        return false;
+function formatTime(ms) {
+    if (!ms || ms <= 0) return '--:--';
+    
+    const totalSeconds = ms / 1000;
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    
+    if (minutes > 0) {
+        return `${minutes}:${seconds.toFixed(2).padStart(5, '0')}`;
     }
+    return `${seconds.toFixed(2)}s`;
+}
+
+function escapeHtml(text) {
+    if (!text) return '';
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function validateDriverName(name) {
+    if (!name || name.length < 3 || name.length > 20) return false;
     return /^[a-zA-Z0-9_]+$/.test(name);
 }
 
-// イベントハンドラー
-$(document).ready(function() {
-    // 閉じるボタン
-    $('#close-ui-btn, .close-modal').on('click', closeRacingUI);
+// ===================================
+// イベントハンドラー初期化
+// ===================================
+document.addEventListener('DOMContentLoaded', function() {
+    // 閉じるボタン（UI全体を閉じる）
+    document.getElementById('close-ui-btn').addEventListener('click', closeRacingUI);
     
-    // フィルターボタン
-    $('.filter-btn').on('click', function() {
-        if ($(this).hasClass('active')) return;
-        
-        $('.filter-btn').removeClass('active');
-        $(this).addClass('active');
-        
-        currentFilter = $(this).data('filter');
-        filterAndDisplayRaces();
+    // 詳細モーダルの閉じるボタン（モーダルだけ閉じる）
+    document.querySelector('.close-detail-modal').addEventListener('click', function(e) {
+        e.stopPropagation();
+        closeDetailModal();
     });
     
-    // 検索
-    $('#search-input').on('input', function() {
-        searchQuery = $(this).val();
-        filterAndDisplayRaces();
+    // 詳細モーダルの背景クリックで閉じる
+    document.getElementById('race-detail-modal').addEventListener('click', function(e) {
+        if (e.target === this) {
+            closeDetailModal();
+        }
+    });
+    
+    // フィルターボタン
+    document.querySelectorAll('.filter-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            if (this.classList.contains('active')) return;
+            
+            document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+            this.classList.add('active');
+            
+            currentFilter = this.getAttribute('data-filter');
+            filterAndDisplayRaces();
+        });
+    });
+    
+    // 検索（デバウンス付き）
+    let searchTimeout;
+    document.getElementById('search-input').addEventListener('input', function() {
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(() => {
+            searchQuery = this.value;
+            filterAndDisplayRaces();
+        }, 200);
     });
     
     // ページネーション
-    $('#prev-page').on('click', () => {
+    document.getElementById('prev-page').addEventListener('click', () => {
         if (currentPage > 1) goToPage(currentPage - 1);
     });
     
-    $('#next-page').on('click', () => {
+    document.getElementById('next-page').addEventListener('click', () => {
         const totalPages = Math.ceil(filteredRaces.length / racesPerPage);
         if (currentPage < totalPages) goToPage(currentPage + 1);
     });
     
     // ドライバー登録
-    $('#register-driver-btn').on('click', function() {
-        const driverName = $('#driver-name-input').val().trim();
+    document.getElementById('register-driver-btn').addEventListener('click', function() {
+        const input = document.getElementById('driver-name-input');
+        const driverName = input.value.trim();
         
         if (!validateDriverName(driverName)) {
-            alert('ドライバーネームは3-20文字の英数字とアンダースコアのみ使用可能です。');
+            input.style.borderColor = '#ef4444';
+            input.style.boxShadow = '0 0 0 3px rgba(239, 68, 68, 0.2)';
+            setTimeout(() => {
+                input.style.borderColor = '';
+                input.style.boxShadow = '';
+            }, 2000);
             return;
         }
         
-        // ボタン無効化（重複送信防止）
-        $(this).prop('disabled', true).text('登録中...');
+        const btn = this;
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 登録中...';
         
-        $.post(`https://${GetParentResourceName()}/registerDriver`, JSON.stringify({
-            driverName: driverName
-        }))
-        .done(function(result) {
-            if (result.success) {
-                $('#current-driver-name').text(result.driverName);
-                $('#driver-setup-modal').fadeOut(200);
-                $('#main-screen').fadeIn(200);
+        nuiPost('registerDriver', { driverName: driverName }).then(result => {
+            if (result && result.success) {
+                document.getElementById('current-driver-name').textContent = result.driverName;
+                document.getElementById('driver-setup-modal').style.display = 'none';
+                document.getElementById('main-screen').style.display = 'flex';
                 loadRaces();
             } else {
-                alert(result.message || 'ドライバー名の登録に失敗しました。');
+                input.style.borderColor = '#ef4444';
+                input.style.boxShadow = '0 0 0 3px rgba(239, 68, 68, 0.2)';
             }
-        })
-        .fail(function() {
-            alert('サーバーとの通信に失敗しました。');
-        })
-        .always(function() {
-            // ボタン復元
-            $('#register-driver-btn').prop('disabled', false).html('<i class="fas fa-check"></i> 登録');
+        }).finally(() => {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-check"></i> 登録';
         });
     });
     
+    // Enter キーでドライバー登録
+    document.getElementById('driver-name-input').addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+            document.getElementById('register-driver-btn').click();
+        }
+    });
+    
     // ドライバー名編集
-    $('#edit-driver-btn').on('click', function() {
-        const newName = prompt('新しいドライバーネームを入力してください:', $('#current-driver-name').text());
+    document.getElementById('edit-driver-btn').addEventListener('click', function() {
+        const currentName = document.getElementById('current-driver-name').textContent;
+        const newName = prompt('新しいドライバーネームを入力してください:', currentName);
         
         if (newName && validateDriverName(newName)) {
-            $.post(`https://${GetParentResourceName()}/updateDriverName`, JSON.stringify({
-                driverName: newName
-            }))
-            .done(function(result) {
-                if (result.success) {
-                    $('#current-driver-name').text(result.driverName);
-                } else {
-                    alert(result.message || 'ドライバー名の更新に失敗しました。');
+            nuiPost('updateDriverName', { driverName: newName }).then(result => {
+                if (result && result.success) {
+                    document.getElementById('current-driver-name').textContent = result.driverName;
                 }
-            })
-            .fail(function() {
-                alert('サーバーとの通信に失敗しました。');
             });
         }
     });
     
+    // スタート地点ウェイポイント設置
+    document.getElementById('set-waypoint-btn').addEventListener('click', function() {
+        if (!selectedRaceId) return;
+        nuiPost('setStartWaypoint', { raceId: selectedRaceId });
+        
+        const btn = this;
+        btn.innerHTML = '<i class="fas fa-check"></i> マップにピンを設置しました！';
+        btn.style.borderColor = '#10b981';
+        btn.style.color = '#34d399';
+        setTimeout(() => {
+            btn.innerHTML = '<i class="fas fa-map-marker-alt"></i> スタート地点をマップに表示';
+            btn.style.borderColor = '';
+            btn.style.color = '';
+        }, 2000);
+    });
+    
     // レース開始
-    $('#start-race-btn').on('click', function() {
+    document.getElementById('start-race-btn').addEventListener('click', function() {
         if (!selectedRaceId) return;
         
-        $.post(`https://${GetParentResourceName()}/startRace`, JSON.stringify({
-            raceId: selectedRaceId
-        }));
-        
+        nuiPost('startRace', { raceId: selectedRaceId });
+        closeDetailModal();
         closeRacingUI();
     });
     
     // 新規レース作成
-    $('#create-race-btn').on('click', function() {
-        $.post(`https://${GetParentResourceName()}/createRace`);
+    document.getElementById('create-race-btn').addEventListener('click', function() {
+        nuiPost('createRace');
+        closeRacingUI();
+    });
+    
+    // レース削除
+    document.getElementById('delete-race-btn').addEventListener('click', function() {
+        if (!selectedRaceId) return;
+        
+        const race = currentRaces.find(r => r.id === selectedRaceId);
+        const raceName = race ? race.name : 'Unknown';
+        
+        if (confirm('レース「' + raceName + '」を削除しますか？\nこの操作は取り消せません。')) {
+            const btn = this;
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 削除中...';
+            
+            nuiPost('deleteRace', { raceId: selectedRaceId }).then(result => {
+                if (result && result.success) {
+                    closeDetailModal();
+                    loadRaces();
+                }
+            }).finally(() => {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-trash-alt"></i> レース削除';
+            });
+        }
+    });
+    
+    // マルチセッション作成（NUIを閉じてox_lib inputDialogへ遷移）
+    document.getElementById('create-session-btn').addEventListener('click', function() {
+        if (!selectedRaceId) return;
+        nuiPost('createSessionDialog', { raceId: selectedRaceId });
+        closeDetailModal();
+        closeRacingUI();
+    });
+    
+    // セッション参加（NUIを閉じてox_libコンテキストメニューへ遷移）
+    document.getElementById('join-session-btn').addEventListener('click', function() {
+        if (!selectedRaceId) return;
+        nuiPost('joinSessionList', { raceId: selectedRaceId });
+        closeDetailModal();
         closeRacingUI();
     });
     
     // ESCキーで閉じる
-    $(document).on('keydown', function(e) {
+    document.addEventListener('keydown', function(e) {
         if (e.key === 'Escape') {
-            closeRacingUI();
+            const detailModal = document.getElementById('race-detail-modal');
+            if (detailModal.style.display !== 'none' && detailModal.style.display !== '') {
+                closeDetailModal();
+            } else {
+                closeRacingUI();
+            }
         }
+    });
+    
+    // レースキャンセルボタン（/race UI内）
+    document.getElementById('cancel-race-btn').addEventListener('click', function() {
+        closeRacingUI();
+        nuiPost('retireRace');
     });
 });

@@ -1,6 +1,6 @@
 -- ===================================
 -- QBX Racing System - Client Race Logic
--- 完全統合版 v3.0.0
+-- 完全統合版 v4.2.0
 -- レース進行・ゴーストモード・チェックポイント管理・視覚効果
 -- ===================================
 
@@ -8,9 +8,9 @@
 -- グローバル変数とステート管理
 -- ===================================
 
--- レース状態
-local isRacing = false
-local isMultiplayerRace = false
+-- レース状態（グローバルスコープ：main.luaからアクセス可能）
+isRacing = false
+isMultiplayerRace = false
 local currentRace = nil
 local raceStartTime = 0
 local currentCheckpoint = 1
@@ -35,6 +35,7 @@ local entityCache = {
 -- オブジェクト・視覚効果管理
 local raceObjects = {}
 local raceBlips = {}
+local activeCheckpointEntities = {}  -- CreateCheckpointで生成したエンティティ管理
 
 -- デバッグモード
 local DEBUG_MODE = GetConvar('qbx_racing_debug', 'false') == 'true'
@@ -524,6 +525,57 @@ function ResetGhostMode()
     DebugLog('Ghost mode reset (basic version)')
 end
 
+-- ===================================
+-- ソロレース用ゴーストモード（NPC衝突回避）
+-- ===================================
+
+-- ソロ用ゴーストモード開始
+function StartSoloGhostMode()
+    if not GetConfigValue('Multiplayer.ghostMode.soloEnabled', true) then 
+        DebugLog('Solo ghost mode disabled in config')
+        return 
+    end
+    
+    isGhostModeActive = true
+    DebugLog('Solo ghost mode started')
+    
+    CreateThread(function()
+        local collisionRadius = GetConfigValue('Multiplayer.ghostMode.collisionRadius', 150.0)
+        
+        while isRacing and not isMultiplayerRace and isGhostModeActive do
+            local playerPed = PlayerPedId()
+            local playerVehicle = GetVehiclePedIsIn(playerPed, false)
+            
+            if playerVehicle ~= 0 then
+                local playerCoords = GetEntityCoords(playerVehicle)
+                
+                -- 全NPC車両をゴースト化
+                local vehicles = GetGamePool('CVehicle')
+                
+                for _, otherVehicle in ipairs(vehicles) do
+                    if otherVehicle ~= playerVehicle and DoesEntityExist(otherVehicle) then
+                        local otherCoords = GetEntityCoords(otherVehicle)
+                        local distance = #(playerCoords - otherCoords)
+                        
+                        if distance <= collisionRadius then
+                            -- NPC車両との衝突無効化
+                            SetEntityNoCollisionEntity(playerVehicle, otherVehicle, true)
+                            SetEntityNoCollisionEntity(otherVehicle, playerVehicle, true)
+                            
+                            -- NPC車両を半透明に
+                            SetEntityAlpha(otherVehicle, 150, false)
+                        end
+                    end
+                end
+            end
+            
+            Wait(0)  -- 毎フレーム（衝突回避は即時性が重要）
+        end
+        
+        ResetGhostMode()
+    end)
+end
+
 -- ゴーストモードリセット（最適化版）
 function ResetGhostModeOptimized()
     isGhostModeActive = false
@@ -593,36 +645,162 @@ function StartRace(race)
     
     DebugLog('Starting solo race: ' .. race.name)
     
-    -- 装飾・ブリップ生成
-    CreateRaceDecorations(raceCheckpoints)
+    -- ブリップ生成（装飾オブジェクトは不要 - CreateCheckpointで十分）
     CreateRaceBlips(raceCheckpoints)
     
-    -- カウントダウン
-    local countdownDuration = GetConfigValue('Race.countdownSeconds', 5)
-    for i = countdownDuration, 1, -1 do
-        lib.notify({
-            title = 'レーススタート',
-            description = tostring(i),
-            type = 'inform'
+    -- スタート地点案内表示
+    local startCp = raceCheckpoints[1]
+    if startCp then
+        local startPos = vector3(startCp.x, startCp.y, startCp.z)
+        local playerPos = GetEntityCoords(ped)
+        local distToStart = #(playerPos - startPos)
+        
+        -- スタート地点にウェイポイント設置
+        SetNewWaypoint(startCp.x, startCp.y)
+        
+        local vehicleTypeConfig = GetConfigValue('VehicleTypes.' .. (race.vehicle_type or 'car'), {})
+        local vehicleLabel = vehicleTypeConfig.label or race.vehicle_type or '車両'
+        local raceTypeLabel = race.race_type == 'sprint' and 'スプリント' or '周回'
+        local totalLaps = race.race_type == 'sprint' and 1 or (race.laps or 1)
+        
+        -- 案内UI表示
+        lib.showTextUI(string.format(
+            '🏁 <b>レース準備中</b>: %s<br><br>'
+            .. '📍 スタート地点まで: <b>%.0fm</b><br>'
+            .. '🚗 車両タイプ: <b>%s</b><br>'
+            .. '🏎️ タイプ: <b>%s</b>（%d周）<br>'
+            .. '📍 CP: <b>%d個</b><br><br>'
+            .. '➡️ スタート地点に向かってください！<br>'
+            .. '到着後すぐにカウントダウンが始まります',
+            race.name, distToStart, vehicleLabel, raceTypeLabel, totalLaps, #raceCheckpoints), {
+            position = "left-center",
+            icon = 'map-marked-alt',
+            style = {
+                borderRadius = 8,
+                backgroundColor = 'rgba(26, 26, 46, 0.95)',
+                color = '#ffffff',
+                borderLeft = '4px solid #fbbf24'
+            }
         })
-        Wait(1000)
     end
     
-    lib.notify({
-        title = 'スタート！',
-        description = 'レース開始！',
-        type = 'success'
-    })
+    -- カウントダウン（スレッド内でブロックしないように実装）
+    local countdownDuration = GetConfigValue('Race.countdownSeconds', 5)
+    local startRadius = GetConfigValue('Checkpoint.radius', 10.0) * 2 -- スタート判定は広めに
     
-    isRacing = true
-    raceStartTime = GetGameTimer()
-    
-    -- レース進行スレッド開始
     CreateThread(function()
-        SoloRaceProgressThread()
+        -- スタート地点への接近を待つ（案内表示更新付き）
+        if startCp then
+            local startPos = vector3(startCp.x, startCp.y, startCp.z)
+            
+            while true do
+                local ped2 = PlayerPedId()
+                local playerPos = GetEntityCoords(ped2)
+                local dist = #(playerPos - startPos)
+                
+                if dist <= startRadius then
+                    -- スタート地点到着
+                    lib.hideTextUI()
+                    break
+                end
+                
+                -- 距離更新（1秒ごと）
+                local vehicleTypeConfig = GetConfigValue('VehicleTypes.' .. (currentRace.vehicle_type or 'car'), {})
+                local vehicleLabel = vehicleTypeConfig.label or currentRace.vehicle_type or '車両'
+                local raceTypeLabel = currentRace.race_type == 'sprint' and 'スプリント' or '周回'
+                local totalLaps = currentRace.race_type == 'sprint' and 1 or (currentRace.laps or 1)
+                
+                lib.showTextUI(string.format(
+                    '🏁 <b>レース準備中</b>: %s<br><br>'
+                    .. '📍 スタート地点まで: <b>%.0fm</b><br>'
+                    .. '🚗 車両タイプ: <b>%s</b><br>'
+                    .. '🏎️ タイプ: <b>%s</b>（%d周）<br>'
+                    .. '📍 CP: <b>%d個</b><br><br>'
+                    .. '➡️ スタート地点に向かってください！<br>'
+                    .. '到着後すぐにカウントダウンが始まります',
+                    currentRace.name, dist, vehicleLabel, raceTypeLabel, totalLaps, #raceCheckpoints), {
+                    position = "left-center",
+                    icon = 'map-marked-alt',
+                    style = {
+                        borderRadius = 8,
+                        backgroundColor = 'rgba(26, 26, 46, 0.95)',
+                        color = '#ffffff',
+                        borderLeft = '4px solid #fbbf24'
+                    }
+                })
+                
+                Wait(1000)
+                
+                -- レース開始前にキャンセルされた場合
+                if not currentRace then
+                    lib.hideTextUI()
+                    ClearRaceBlips()
+                    return
+                end
+            end
+        end
+        
+        -- ウェイポイント削除
+        SetWaypointOff()
+        
+        -- 即座にカウントダウン開始
+        lib.notify({
+            title = 'カウントダウン開始！',
+            description = string.format('%d秒後にスタートします', countdownDuration),
+            type = 'inform',
+            duration = 2000
+        })
+        
+        for i = countdownDuration, 1, -1 do
+            lib.showTextUI(string.format([[%d]], i), {
+                position = "top-center",
+                icon = 'stopwatch',
+                style = {
+                    borderRadius = 16,
+                    backgroundColor = i <= 3 and 'rgba(239, 68, 68, 0.95)' or 'rgba(251, 191, 36, 0.95)',
+                    color = 'white',
+                    fontSize = '48px',
+                    fontWeight = 'bold',
+                    padding = '24px 48px'
+                }
+            })
+            PlaySoundFrontend(-1, 'CHECKPOINT_PERFECT', 'HUD_MINI_GAME_SOUNDSET', true)
+            Wait(1000)
+            lib.hideTextUI()
+        end
+        
+        -- GO!
+        lib.showTextUI('GO!', {
+            position = "top-center",
+            icon = 'flag-checkered',
+            style = {
+                borderRadius = 16,
+                backgroundColor = 'rgba(16, 185, 129, 0.95)',
+                color = 'white',
+                fontSize = '64px',
+                fontWeight = 'bold',
+                padding = '24px 48px'
+            }
+        })
+        PlaySoundFrontend(-1, 'GO', 'HUD_MINI_GAME_SOUNDSET', true)
+        
+        isRacing = true
+        raceStartTime = GetGameTimer()
+        
+        -- ソロ用ゴーストモード開始（NPC衝突回避）
+        StartSoloGhostMode()
+        
+        SetTimeout(1500, function()
+            lib.hideTextUI()
+        end)
+        
+        -- レース進行スレッド開始
+        CreateThread(function()
+            SoloRaceProgressThread()
+        end)
+        CreateThread(RaceDrawThread)
+        CreateThread(SoloRaceUI)
     end)
-    CreateThread(RaceDrawThread)
-    CreateThread(SoloRaceUI)
 end
 
 -- ソロレース進行処理
@@ -653,6 +831,7 @@ function SoloRaceProgressThread()
                 if currentCheckpoint > #raceCheckpoints then
                     if isSprintRace or currentLap >= totalLaps then
                         -- レース完了
+                        ClearCheckpointEntities()
                         FinishSoloRace()
                         break
                     else
@@ -665,6 +844,9 @@ function SoloRaceProgressThread()
                             SetBlipColour(blip, i == #raceCheckpoints and 38 or 5)
                         end
                         
+                        -- チェックポイント表示更新
+                        UpdateRaceCheckpoints()
+                        
                         lib.notify({
                             title = 'ラップ完了',
                             description = string.format('ラップ %d/%d', currentLap, totalLaps),
@@ -674,7 +856,9 @@ function SoloRaceProgressThread()
                         PlaySoundFrontend(-1, 'CHECKPOINT_PERFECT', 'HUD_MINI_GAME_SOUNDSET', true)
                     end
                 else
-                    -- チェックポイント通過
+                    -- チェックポイント通過 → 表示更新
+                    UpdateRaceCheckpoints()
+                    
                     PlaySoundFrontend(-1, 'CHECKPOINT_PERFECT', 'HUD_MINI_GAME_SOUNDSET', true)
                     
                     lib.notify({
@@ -700,29 +884,26 @@ function SoloRaceUI()
             local raceTypeLabel = currentRace.race_type == 'sprint' and 'スプリント' or '周回'
             local totalLaps = currentRace.race_type == 'sprint' and 1 or (currentRace.laps or 1)
             
-            lib.showTextUI(string.format([[
-🏁 %s レース進行中
-
-⏱️ タイム: %ss
-🔄 CP: %d / %d
-🏁 ラップ: %d / %d
-            ]], raceTypeLabel, timeFormatted, 
-                math.max(0, currentCheckpoint - 1), #raceCheckpoints,
-                currentLap, totalLaps), {
-                position = "right-center",
-                icon = 'flag-checkered',
-                style = {
-                    borderRadius = 8,
-                    backgroundColor = 'rgba(26, 26, 46, 0.95)',
-                    color = '#ffffff',
-                    borderLeft = '4px solid #ef4444'
-                }
+            -- NUI レースHUD更新（リタイアボタン付き）
+            SendNUIMessage({
+                action = 'updateRaceHUD',
+                visible = true,
+                raceType = raceTypeLabel,
+                time = timeFormatted,
+                checkpoint = math.max(0, currentCheckpoint - 1),
+                totalCheckpoints = #raceCheckpoints,
+                lap = currentLap,
+                totalLaps = totalLaps,
+                isMultiplayer = false,
+                position = nil,
+                totalParticipants = nil
             })
             
             Wait(100)
         end
         
-        lib.hideTextUI()
+        -- レース終了時にHUD非表示
+        SendNUIMessage({ action = 'updateRaceHUD', visible = false })
     end)
 end
 
@@ -749,6 +930,101 @@ function FinishSoloRace()
     
     ClearRaceObjects()
     ClearRaceBlips()
+    ClearCheckpointEntities()
+    
+    -- NUI HUD非表示
+    SendNUIMessage({ action = 'updateRaceHUD', visible = false })
+    
+    -- ゴーストモードリセット
+    if isGhostModeActive then
+        ResetGhostMode()
+    end
+    
+    lib.hideTextUI()
+end
+
+-- ===================================
+-- リタイア（レース放棄）システム
+-- ===================================
+
+-- ソロレースリタイア
+function RetireSoloRace()
+    if not isRacing then return end
+    
+    DebugLog('Solo race retired')
+    
+    lib.notify({
+        title = 'リタイア',
+        description = 'レースを放棄しました',
+        type = 'error',
+        duration = 5000
+    })
+    
+    -- NUI HUD非表示
+    SendNUIMessage({ action = 'updateRaceHUD', visible = false })
+    
+    -- クリーンアップ
+    isRacing = false
+    currentRace = nil
+    currentCheckpoint = 1
+    currentLap = 1
+    raceCheckpoints = {}
+    
+    ClearRaceObjects()
+    ClearRaceBlips()
+    ClearCheckpointEntities()
+    
+    -- ゴーストモードリセット
+    if isGhostModeActive then
+        ResetGhostMode()
+    end
+    
+    lib.hideTextUI()
+end
+
+-- マルチプレイヤーレースリタイア
+function RetireMultiplayerRace()
+    if not isRacing or not isMultiplayerRace then return end
+    
+    DebugLog('Multiplayer race retired - Session: ' .. tostring(multiplayerSessionId))
+    
+    -- サーバーにリタイア通知
+    TriggerServerEvent('qbx_racing:server:retireRace', multiplayerSessionId)
+    
+    lib.notify({
+        title = 'リタイア',
+        description = 'レースを放棄しました',
+        type = 'error',
+        duration = 5000
+    })
+    
+    -- NUI HUD非表示
+    SendNUIMessage({ action = 'updateRaceHUD', visible = false })
+    
+    -- クリーンアップ
+    isRacing = false
+    isMultiplayerRace = false
+    multiplayerSessionId = nil
+    currentRace = nil
+    currentCheckpoint = 1
+    currentLap = 1
+    raceCheckpoints = {}
+    ghostPlayers = {}
+    progressData = {}
+    
+    ClearRaceObjects()
+    ClearRaceBlips()
+    ClearCheckpointEntities()
+    
+    -- ゴーストモードリセット
+    if isGhostModeActive then
+        if GetConfigValue('Multiplayer.ghostMode.optimizedMode', false) then
+            ResetGhostModeOptimized()
+        else
+            ResetGhostMode()
+        end
+    end
+    
     lib.hideTextUI()
 end
 
@@ -784,8 +1060,7 @@ function StartMultiplayerRace(race, sessionId, participants)
     
     DebugLog('Starting multiplayer race - Session: ' .. sessionId .. ', Participants: ' .. #ghostPlayers)
     
-    -- 装飾・ブリップ生成
-    CreateRaceDecorations(raceCheckpoints)
+    -- ブリップ生成（装飾オブジェクトは不要）
     CreateRaceBlips(raceCheckpoints)
     
     -- ゴーストモード開始（設定に応じて基本版または最適化版）
@@ -839,6 +1114,7 @@ function MultiplayerRaceProgressThread(isSprintRace, totalLaps)
                 if currentCheckpoint > #raceCheckpoints then
                     if isSprintRace or currentLap >= totalLaps then
                         -- レース完了
+                        ClearCheckpointEntities()
                         FinishMultiplayerRace()
                         break
                     else
@@ -851,6 +1127,9 @@ function MultiplayerRaceProgressThread(isSprintRace, totalLaps)
                             SetBlipColour(blip, i == #raceCheckpoints and 38 or 5)
                         end
                         
+                        -- チェックポイント表示更新
+                        UpdateRaceCheckpoints()
+                        
                         lib.notify({
                             title = 'ラップ完了',
                             description = string.format('ラップ %d/%d', currentLap, totalLaps),
@@ -860,7 +1139,9 @@ function MultiplayerRaceProgressThread(isSprintRace, totalLaps)
                         PlaySoundFrontend(-1, 'CHECKPOINT_PERFECT', 'HUD_MINI_GAME_SOUNDSET', true)
                     end
                 else
-                    -- チェックポイント通過
+                    -- チェックポイント通過 → 表示更新
+                    UpdateRaceCheckpoints()
+                    
                     PlaySoundFrontend(-1, 'CHECKPOINT_PERFECT', 'HUD_MINI_GAME_SOUNDSET', true)
                     
                     lib.notify({
@@ -889,30 +1170,26 @@ function MultiplayerRaceUI()
             local raceTypeLabel = currentRace.race_type == 'sprint' and 'スプリント' or '周回'
             local totalLaps = currentRace.race_type == 'sprint' and 1 or (currentRace.laps or 1)
             
-            lib.showTextUI(string.format([[
-🏁 %s レース進行中
-
-⏱️ タイム: %ss
-🏆 順位: %d / %d
-🔄 CP: %d / %d
-🏁 ラップ: %d / %d
-            ]], raceTypeLabel, timeFormatted, myPosition, totalParticipants, 
-                math.max(0, currentCheckpoint - 1), #raceCheckpoints,
-                currentLap, totalLaps), {
-                position = "right-center",
-                icon = 'flag-checkered',
-                style = {
-                    borderRadius = 8,
-                    backgroundColor = 'rgba(26, 26, 46, 0.95)',
-                    color = '#ffffff',
-                    borderLeft = '4px solid #ef4444'
-                }
+            -- NUI レースHUD更新（リタイアボタン付き）
+            SendNUIMessage({
+                action = 'updateRaceHUD',
+                visible = true,
+                raceType = raceTypeLabel,
+                time = timeFormatted,
+                checkpoint = math.max(0, currentCheckpoint - 1),
+                totalCheckpoints = #raceCheckpoints,
+                lap = currentLap,
+                totalLaps = totalLaps,
+                isMultiplayer = true,
+                position = myPosition,
+                totalParticipants = totalParticipants
             })
             
             Wait(100)
         end
         
-        lib.hideTextUI()
+        -- レース終了時にHUD非表示
+        SendNUIMessage({ action = 'updateRaceHUD', visible = false })
     end)
 end
 
@@ -966,6 +1243,10 @@ function FinishMultiplayerRace()
     
     ClearRaceObjects()
     ClearRaceBlips()
+    ClearCheckpointEntities()
+    
+    -- NUI HUD非表示
+    SendNUIMessage({ action = 'updateRaceHUD', visible = false })
     
     -- ゴーストモードリセット
     if GetConfigValue('Multiplayer.ghostMode.optimizedMode', false) then
@@ -978,47 +1259,154 @@ function FinishMultiplayerRace()
 end
 
 -- ===================================
--- レース描画システム
+-- レースチェックポイント描画システム（CreateCheckpoint使用）
 -- ===================================
 
--- レース中のマーカー描画
-function RaceDrawThread()
-    CreateThread(function()
-        while isRacing and currentRace do
-            -- 現在のチェックポイント
-            if currentCheckpoint <= #raceCheckpoints then
-                local cp = raceCheckpoints[currentCheckpoint]
-                local vehicleType = currentRace.vehicle_type or 'car'
-                local markerColor = GetConfigValue('VehicleTypes.' .. vehicleType .. '.markerColor', {r = 255, g = 0, b = 0, a = 150})
-                
-                DrawMarker(
-                    1, -- 円柱型マーカー
-                    cp.x, cp.y, cp.z - 1.0,
-                    0.0, 0.0, 0.0,
-                    0.0, 0.0, 0.0,
-                    (cp.radius or 10.0) * 2, (cp.radius or 10.0) * 2, 5.0,
-                    markerColor.r, markerColor.g, markerColor.b, markerColor.a,
-                    false, false, 2, false, nil, nil, false
-                )
-            end
-            
-            -- 次のチェックポイント（半透明）
-            if currentCheckpoint < #raceCheckpoints then
-                local nextCp = raceCheckpoints[currentCheckpoint + 1]
-                DrawMarker(
-                    1,
-                    nextCp.x, nextCp.y, nextCp.z - 1.0,
-                    0.0, 0.0, 0.0,
-                    0.0, 0.0, 0.0,
-                    (nextCp.radius or 10.0) * 2, (nextCp.radius or 10.0) * 2, 5.0,
-                    255, 255, 255, 50,
-                    false, false, 2, false, nil, nil, false
-                )
-            end
-            
-            Wait(0)
+-- チェックポイントエンティティをすべて削除
+function ClearCheckpointEntities()
+    for _, cpHandle in ipairs(activeCheckpointEntities) do
+        DeleteCheckpoint(cpHandle)
+    end
+    activeCheckpointEntities = {}
+    DebugLog('Checkpoint entities cleared')
+end
+
+-- チェックポイントエンティティを1つ生成
+-- cpType: チェックポイントタイプID（0-47）
+-- pos: 表示座標 vector3
+-- pointTo: 矢印の向き先座標 vector3 (nilなら矢印なし)
+-- radius: 半径
+-- color: {r,g,b,a}
+-- iconColor: {r,g,b,a} アイコン（矢印/チェッカー）の色
+-- nearHeight: 近接時の高さ（柱の長さ）
+function CreateCheckpointEntity(cpType, pos, pointTo, radius, height, color, iconColor, nearHeight)
+    local pointToX, pointToY, pointToZ = 0.0, 0.0, 0.0
+    if pointTo then
+        pointToX, pointToY, pointToZ = pointTo.x, pointTo.y, pointTo.z
+    end
+
+    local cp = CreateCheckpoint(
+        cpType,
+        pos.x, pos.y, pos.z,
+        pointToX, pointToY, pointToZ,
+        radius,
+        color.r, color.g, color.b, math.floor(color.a),
+        0  -- reserved
+    )
+
+    if cp then
+        SetCheckpointCylinderHeight(cp, height, nearHeight or 100.0, radius)
+        SetCheckpointIconRgba(cp, iconColor.r, iconColor.g, iconColor.b, iconColor.a)
+        table.insert(activeCheckpointEntities, cp)
+    end
+
+    return cp
+end
+
+-- 現在のチェックポイント表示を更新（進行に合わせて呼び出す）
+function UpdateRaceCheckpoints()
+    -- 既存のチェックポイントエンティティを全削除して再生成
+    ClearCheckpointEntities()
+
+    if not currentRace or not isRacing then return end
+
+    local vehicleType = currentRace.vehicle_type or 'car'
+    local cpConfig = GetConfigValue('VehicleTypes.' .. vehicleType .. '.checkpoint', {
+        type = 0, typeNoArrow = 2, goalType = 4,
+        radius = 10.0, height = 5.0, nearHeight = 100.0,
+        color = {r = 255, g = 0, b = 0, a = 200},
+        goalColor = {r = 255, g = 215, b = 0, a = 200},
+        nextColor = {r = 255, g = 255, b = 255, a = 80},
+        iconColor = {r = 255, g = 255, b = 255, a = 255}
+    })
+
+    local totalCPs = #raceCheckpoints
+
+    -- 現在のチェックポイント
+    if currentCheckpoint <= totalCPs then
+        local cp = raceCheckpoints[currentCheckpoint]
+        local cpPos = vector3(cp.x, cp.y, cp.z)
+        local isGoal = (currentCheckpoint == totalCPs)
+
+        -- ゴール判定（スプリントの最終CP or 周回の最終ラップ最終CP）
+        local isSprintRace = (currentRace.race_type == 'sprint')
+        local totalLaps = isSprintRace and 1 or (currentRace.laps or 1)
+        local isFinalGoal = isGoal and (isSprintRace or currentLap >= totalLaps)
+
+        if isFinalGoal then
+            -- ゴールチェックポイント（矢印なし、チェッカーフラッグ）
+            CreateCheckpointEntity(
+                cpConfig.goalType,
+                cpPos, nil,
+                cpConfig.radius, cpConfig.height,
+                cpConfig.goalColor, cpConfig.iconColor,
+                cpConfig.nearHeight
+            )
+        else
+            -- 通過チェックポイント（次CPへの矢印表示）
+            local nextIdx = currentCheckpoint + 1
+            if nextIdx > totalCPs then nextIdx = 1 end -- 周回の場合最初に戻る
+            local nextCp = raceCheckpoints[nextIdx]
+            local nextPos = vector3(nextCp.x, nextCp.y, nextCp.z)
+
+            CreateCheckpointEntity(
+                cpConfig.type,
+                cpPos, nextPos,
+                cpConfig.radius, cpConfig.height,
+                cpConfig.color, cpConfig.iconColor,
+                cpConfig.nearHeight
+            )
         end
-    end)
+    end
+
+    -- 次のチェックポイント（半透明プレビュー）
+    local previewIdx = currentCheckpoint + 1
+    if previewIdx <= totalCPs then
+        local nextCp = raceCheckpoints[previewIdx]
+        local nextPos = vector3(nextCp.x, nextCp.y, nextCp.z)
+        local isNextGoal = (previewIdx == totalCPs)
+
+        -- 次の次のCP方向（矢印用）
+        local pointToIdx = previewIdx + 1
+        if pointToIdx > totalCPs then pointToIdx = 1 end
+        local pointToCp = raceCheckpoints[pointToIdx]
+        local pointToPos = vector3(pointToCp.x, pointToCp.y, pointToCp.z)
+
+        local isSprintRace = (currentRace.race_type == 'sprint')
+        local totalLaps = isSprintRace and 1 or (currentRace.laps or 1)
+        local isNextFinalGoal = isNextGoal and (isSprintRace or currentLap >= totalLaps)
+
+        if isNextFinalGoal then
+            CreateCheckpointEntity(
+                cpConfig.goalType,
+                nextPos, nil,
+                cpConfig.radius, cpConfig.height,
+                cpConfig.nextColor, cpConfig.iconColor,
+                cpConfig.nearHeight
+            )
+        else
+            CreateCheckpointEntity(
+                cpConfig.type,
+                nextPos, pointToPos,
+                cpConfig.radius, cpConfig.height,
+                cpConfig.nextColor, cpConfig.iconColor,
+                cpConfig.nearHeight
+            )
+        end
+    end
+
+    DebugLog('Checkpoints updated: current=' .. currentCheckpoint .. '/' .. totalCPs)
+end
+
+-- レース中のチェックポイント監視スレッド（毎フレーム描画不要）
+function RaceDrawThread()
+    -- 初回表示
+    UpdateRaceCheckpoints()
+
+    -- チェックポイント更新は進行処理（SoloRaceProgressThread / MultiplayerRaceProgressThread）
+    -- 内でCP通過時に UpdateRaceCheckpoints() を呼び出すため、
+    -- ここでは何もしない（DrawMarkerと違い毎フレーム描画不要）
+    DebugLog('RaceDrawThread: checkpoint entities created (no per-frame draw needed)')
 end
 
 -- ===================================
@@ -1049,11 +1437,14 @@ AddEventHandler('onResourceStop', function(resourceName)
     if isRacing then
         isRacing = false
         lib.hideTextUI()
+        SendNUIMessage({ action = 'updateRaceHUD', visible = false })
         ClearRaceObjects()
         ClearRaceBlips()
+        ClearCheckpointEntities()
         
-        if isMultiplayerRace then
-            if GetConfigValue('Multiplayer.ghostMode.optimizedMode', false) then
+        -- ゴーストモードリセット（ソロ・マルチ共通）
+        if isGhostModeActive then
+            if isMultiplayerRace and GetConfigValue('Multiplayer.ghostMode.optimizedMode', false) then
                 ResetGhostModeOptimized()
             else
                 ResetGhostMode()
@@ -1075,6 +1466,17 @@ AddEventHandler('onResourceStop', function(resourceName)
     
     print('^2[QBX Racing]^7 レースロジック停止完了')
 end)
+
+-- ===================================
+-- レース状態取得ヘルパー（main.luaから呼び出し用）
+-- ===================================
+function IsCurrentlyRacing()
+    return isRacing
+end
+
+function IsCurrentlyMultiplayer()
+    return isMultiplayerRace
+end
 
 -- ===================================
 -- 初期化
