@@ -162,16 +162,19 @@ function RaceMarkers.Draw(kind, pos, alphaScale, vehicleType)
     local isCentered = GetOption(set, 'centerOnPoint')
     local markerZ = isCentered and pos.z or groundZ + size * (0.5 - anchor)
 
-    DrawMarker(
-        9,
-        pos.x, pos.y, markerZ,
-        0.0, 0.0, 0.0,
-        rotation.x, rotation.y, rotation.z,
-        size, size, size,
-        255, 255, 255, alpha,
-        false, GetOption(set, 'faceCamera') ~= false, 2, false,
-        markerConfig.textureDict, textureName, false
-    )
+    -- showImage = false の場合は画像を出さず、反応範囲の表示だけにする
+    if style.showImage ~= false then
+        DrawMarker(
+            9,
+            pos.x, pos.y, markerZ,
+            0.0, 0.0, 0.0,
+            rotation.x, rotation.y, rotation.z,
+            size, size, size,
+            255, 255, 255, alpha,
+            false, GetOption(set, 'faceCamera') ~= false, 2, false,
+            markerConfig.textureDict, textureName, false
+        )
+    end
 
     -- 反応範囲の丸
     if style.ringColor and pos.radius then
@@ -182,14 +185,16 @@ function RaceMarkers.Draw(kind, pos, alphaScale, vehicleType)
 end
 
 -- ===================================
--- ルート線（自分の位置から次のチェックポイントまで）
+-- ルート線
+-- from = 'player'    : 自分の位置から次のチェックポイントまで
+-- from = 'checkpoint': 次のチェックポイントからその次のチェックポイントまで
 -- ===================================
 
 -- 区切りの位置は一定間隔でまとめて計算し、毎フレームは描画だけ行う
 local routeCache = {time = 0, target = nil, points = {}}
 
--- 自分の位置から目標までの区切りの位置を計算
-local function BuildRoutePoints(from, target, route)
+-- from から target までの区切りの位置を計算（startDistance: from から何メートル先から並べるか）
+local function BuildRoutePoints(from, target, route, startDistance)
     local points = {}
     local dx, dy, dz = target.x - from.x, target.y - from.y, target.z - from.z
     local total = math.sqrt(dx * dx + dy * dy + dz * dz)
@@ -200,7 +205,7 @@ local function BuildRoutePoints(from, target, route)
     local spacing = route.spacing or 4.0
     local heading = GetHeadingFromVector_2d(dx, dy)
 
-    local distance = route.startDistance or 4.0
+    local distance = startDistance
     while distance <= length do
         local rate = distance / total
         local x, y, z = from.x + dx * rate, from.y + dy * rate, from.z + dz * rate
@@ -223,9 +228,9 @@ local function BuildRoutePoints(from, target, route)
 end
 
 -- ルート線を描画
--- from: 自分の位置、target: 次のチェックポイント、nextCp: その次（細い線でつなぐ、nil 可）
+-- playerPos: 自分の位置、target: 次のチェックポイント、nextCp: その次（nil 可）
 -- targetKind: 目標の画像の種類（線の色を合わせる）
-function RaceMarkers.DrawRouteLine(from, target, nextCp, targetKind, vehicleType)
+function RaceMarkers.DrawRouteLine(playerPos, target, nextCp, targetKind, vehicleType)
     if not isTextureReady then return end
 
     local set = GetSet(vehicleType)
@@ -234,10 +239,21 @@ function RaceMarkers.DrawRouteLine(from, target, nextCp, targetKind, vehicleType
 
     local style = ResolveStyle(set, vehicleType, targetKind)
     local color = route.color or (style and style.ringColor) or {r = 255, g = 255, b = 255}
+    local fromCheckpoint = route.from == 'checkpoint'
 
+    -- 自分から引く線は動くたびに再計算、チェックポイント同士の線は目標が変わった時だけ計算
     local now = GetGameTimer()
-    if routeCache.target ~= target or now - routeCache.time >= (route.updateInterval or 100) then
-        routeCache.points = BuildRoutePoints(from, target, route)
+    local isStale = routeCache.target ~= target
+        or (not fromCheckpoint and now - routeCache.time >= (route.updateInterval or 100))
+    if isStale then
+        if fromCheckpoint then
+            -- チェックポイントの反応範囲の外から並べる（その次がない＝ゴール前は線なし）
+            routeCache.points = nextCp
+                and BuildRoutePoints(target, nextCp, route, target.radius or 10.0)
+                or {}
+        else
+            routeCache.points = BuildRoutePoints(playerPos, target, route, route.startDistance or 4.0)
+        end
         routeCache.target = target
         routeCache.time = now
     end
