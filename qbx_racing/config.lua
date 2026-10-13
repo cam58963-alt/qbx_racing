@@ -568,6 +568,36 @@ Config.UI = {
     command = 'race',              -- UIを開くコマンド
     keybind = nil,                 -- キーバインド（nil = 無効、例: 'F6'）
     
+    -- 表示モード
+    -- 'standalone' : 今までどおり /race で全画面のメニューを開く
+    -- 'tablet'     : cam_tablet のアプリとして開く（/race はアプリを開くショートカット）
+    -- ※ レース中の HUD はどちらのモードでも画面に表示
+    -- ※ tablet でもタブレットのリソースが起動していなければ standalone で動作
+    mode = 'standalone',
+    
+    -- タブレット連携（mode = 'tablet' のとき）
+    tablet = {
+        resource = 'cam_tablet',   -- タブレットのリソース名
+        commandOpensApp = true,    -- /race（とキーバインド）でタブレットのアプリを開く
+        
+        -- タブレットに登録するアプリ（cam_tablet の RegisterApp にそのまま渡す）
+        app = {
+            id = 'racing',
+            label = 'レーシング',
+            description = 'レースの一覧・ランキング・セッション参加・コース作成',
+            icon = 'fa-solid fa-flag-checkered',  -- Font Awesome 6 のクラス、または画像URL
+            color = '#ef4444',
+            category = 'ゲーム',
+            developer = 'QBX Racing',
+            size = 24,                 -- MB（ダウンロード演出用）
+            featured = true,           -- ストアのおすすめに表示
+            system = false,            -- true で全員インストール済み & 削除不可
+            -- deviceItem = 'racing_tablet',  -- このアプリ専用の端末アイテム（ox_inventory に定義が必要）
+            -- jobs = { racer = 0 },          -- 職業制限
+            -- item = 'usb_racing',           -- インストールに必要なアイテム
+        }
+    },
+    
     -- ページネーション
     racesPerPage = 12,             -- 1ページあたりのレース数
     gridColumns = 4,               -- グリッド列数

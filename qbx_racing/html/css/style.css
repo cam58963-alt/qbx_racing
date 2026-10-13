@@ -1177,3 +1177,30 @@ input[type="text"] {
         font-size: 1.5rem;
     }
 }
+
+/* ===================================
+   タブレット (cam_tablet) のアプリとして表示
+   =================================== */
+body.in-tablet .racing-container {
+    background: transparent;
+    backdrop-filter: none;
+}
+
+body.in-tablet .screen {
+    width: 100%;
+    max-width: none;
+    height: 100vh;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    padding: 20px 24px;
+    animation: none;
+}
+
+body.in-tablet .modal {
+    background: rgba(0, 0, 0, 0.6);
+}
+
+body.in-tablet .modal-content.large {
+    max-height: 92vh;
+}

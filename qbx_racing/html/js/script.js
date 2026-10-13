@@ -11,11 +11,22 @@ let searchQuery = '';
 let isAdmin = false;
 let isCurrentlyRacing = false;
 
+// タブレット (cam_tablet) のアプリとして開かれている場合はリソース名が入る
+// 例: nui://qbx_racing/html/index.html?tablet=cam_tablet
+const TABLET_RESOURCE = new URLSearchParams(location.search).get('tablet');
+const IS_TABLET = !!TABLET_RESOURCE;
+
 // ===================================
 // NUIメッセージ受信
 // ===================================
 window.addEventListener('message', function(event) {
-    const data = event.data;
+    // タブレットからのメッセージは SDK (CamTablet.on('message')) で受け取る
+    if (IS_TABLET) return;
+    handleMessage(event.data);
+});
+
+function handleMessage(data) {
+    if (!data) return;
     
     switch(data.action) {
         case 'openUI':
@@ -34,7 +45,7 @@ window.addEventListener('message', function(event) {
             updateRaceHUD(data);
             break;
     }
-});
+}
 
 // ===================================
 // FiveM NUI API ヘルパー
@@ -42,6 +53,11 @@ window.addEventListener('message', function(event) {
 function getResourceName() {
     if (typeof GetParentResourceName === 'function') {
         return GetParentResourceName();
+    }
+    // iframe 内など GetParentResourceName が無い場合は URL (cfx-nui-<リソース名>) から取得
+    const host = location.hostname || '';
+    if (host.indexOf('cfx-nui-') === 0) {
+        return host.slice(8);
     }
     return 'qbx_racing';
 }
@@ -96,6 +112,12 @@ function openRacingUI(data) {
 }
 
 function closeRacingUI() {
+    // タブレットではアプリを閉じてホームに戻る
+    if (IS_TABLET) {
+        CamTablet.home();
+        return;
+    }
+    
     const ui = document.getElementById('racing-ui');
     ui.style.transition = 'opacity 0.25s ease';
     ui.style.opacity = '0';
@@ -103,6 +125,28 @@ function closeRacingUI() {
         ui.style.display = 'none';
     }, 250);
     nuiPost('closeUI');
+}
+
+// レース開始・ダイアログ表示などでゲーム画面に戻る時
+// （タブレットは Lua 側で閉じるので、ここでは何もしない）
+function leaveRacingUI() {
+    if (IS_TABLET) return;
+    closeRacingUI();
+}
+
+// 入力・確認ダイアログ（タブレットでは SDK のダイアログを使う）
+function askText(title, value) {
+    if (IS_TABLET) {
+        return CamTablet.prompt({ title: title, value: value });
+    }
+    return Promise.resolve(prompt(title, value));
+}
+
+function askConfirm(title, message) {
+    if (IS_TABLET) {
+        return CamTablet.confirm({ title: title, message: message, okLabel: '削除', danger: true });
+    }
+    return Promise.resolve(confirm(title + '\n' + message));
 }
 
 function showDriverSetup() {
@@ -504,9 +548,9 @@ document.addEventListener('DOMContentLoaded', function() {
     });
     
     // ドライバー名編集
-    document.getElementById('edit-driver-btn').addEventListener('click', function() {
+    document.getElementById('edit-driver-btn').addEventListener('click', async function() {
         const currentName = document.getElementById('current-driver-name').textContent;
-        const newName = prompt('新しいドライバーネームを入力してください:', currentName);
+        const newName = await askText('新しいドライバーネームを入力してください', currentName);
         
         if (newName && validateDriverName(newName)) {
             nuiPost('updateDriverName', { driverName: newName }).then(result => {
@@ -539,23 +583,23 @@ document.addEventListener('DOMContentLoaded', function() {
         
         nuiPost('startRace', { raceId: selectedRaceId });
         closeDetailModal();
-        closeRacingUI();
+        leaveRacingUI();
     });
     
     // 新規レース作成
     document.getElementById('create-race-btn').addEventListener('click', function() {
         nuiPost('createRace');
-        closeRacingUI();
+        leaveRacingUI();
     });
     
     // レース削除
-    document.getElementById('delete-race-btn').addEventListener('click', function() {
+    document.getElementById('delete-race-btn').addEventListener('click', async function() {
         if (!selectedRaceId) return;
         
         const race = currentRaces.find(r => r.id === selectedRaceId);
         const raceName = race ? race.name : 'Unknown';
         
-        if (confirm('レース「' + raceName + '」を削除しますか？\nこの操作は取り消せません。')) {
+        if (await askConfirm('レース「' + raceName + '」を削除しますか？', 'この操作は取り消せません。')) {
             const btn = this;
             btn.disabled = true;
             btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 削除中...';
@@ -577,7 +621,7 @@ document.addEventListener('DOMContentLoaded', function() {
         if (!selectedRaceId) return;
         nuiPost('createSessionDialog', { raceId: selectedRaceId });
         closeDetailModal();
-        closeRacingUI();
+        leaveRacingUI();
     });
     
     // セッション参加（NUIを閉じてox_libコンテキストメニューへ遷移）
@@ -585,11 +629,12 @@ document.addEventListener('DOMContentLoaded', function() {
         if (!selectedRaceId) return;
         nuiPost('joinSessionList', { raceId: selectedRaceId });
         closeDetailModal();
-        closeRacingUI();
+        leaveRacingUI();
     });
     
-    // ESCキーで閉じる
+    // ESCキーで閉じる（タブレットでは SDK がタブレットごと閉じる）
     document.addEventListener('keydown', function(e) {
+        if (IS_TABLET) return;
         if (e.key === 'Escape') {
             const detailModal = document.getElementById('race-detail-modal');
             if (detailModal.style.display !== 'none' && detailModal.style.display !== '') {
@@ -602,7 +647,34 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // レースキャンセルボタン（/race UI内）
     document.getElementById('cancel-race-btn').addEventListener('click', function() {
-        closeRacingUI();
+        leaveRacingUI();
         nuiPost('retireRace');
     });
+    
+    if (IS_TABLET) {
+        initTablet();
+    }
 });
+
+// ===================================
+// タブレット (cam_tablet) のアプリとして動かす
+// ===================================
+function initTablet() {
+    document.body.classList.add('in-tablet');
+    
+    // タブレットの SDK を読み込んでから画面を開く
+    const sdk = document.createElement('script');
+    sdk.src = `nui://${TABLET_RESOURCE}/html/sdk/cam-tablet.js`;
+    sdk.onload = function() {
+        CamTablet.on('message', handleMessage);
+        CamTablet.ready(function() {
+            nuiPost('getUIState').then(function(state) {
+                openRacingUI(state || {});
+            });
+        });
+    };
+    sdk.onerror = function() {
+        console.error(`[QBX Racing] タブレットの SDK を読み込めません: ${sdk.src}`);
+    };
+    document.head.appendChild(sdk);
+}

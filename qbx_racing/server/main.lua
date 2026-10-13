@@ -1363,6 +1363,35 @@ end
 -- ===================================
 
 -- リソース起動時
+-- ===================================
+-- タブレット連携（Config.UI.mode = 'tablet' のときアプリとして登録）
+-- ===================================
+local function RegisterTabletApp()
+    local ui = Config.UI or {}
+    local tablet = ui.tablet or {}
+    if ui.mode ~= 'tablet' then return end
+    
+    local tabletResource = tablet.resource or 'cam_tablet'
+    if GetResourceState(tabletResource) ~= 'started' then return end
+    
+    -- 設定をコピーして、表示するページ（タブレット向け表示）を付ける
+    local app = {}
+    for key, value in pairs(tablet.app or {}) do
+        app[key] = value
+    end
+    app.id = app.id or 'racing'
+    app.label = app.label or 'レーシング'
+    app.url = ('nui://%s/html/index.html?tablet=%s'):format(GetCurrentResourceName(), tabletResource)
+    
+    exports[tabletResource]:RegisterApp(app)
+    print(('^2[QBX Racing]^7 タブレット (%s) にアプリ「%s」を登録しました'):format(tabletResource, app.label))
+end
+
+-- タブレットが後から起動・再起動した場合も登録する
+AddEventHandler(((Config.UI and Config.UI.tablet and Config.UI.tablet.resource) or 'cam_tablet') .. ':ready', RegisterTabletApp)
+
+CreateThread(RegisterTabletApp)
+
 AddEventHandler('onResourceStart', function(resourceName)
     if GetCurrentResourceName() ~= resourceName then return end
     

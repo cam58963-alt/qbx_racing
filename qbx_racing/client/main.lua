@@ -50,12 +50,100 @@ local function DebugLog(message)
     end
 end
 
--- 安全なNUIメッセージ送信
+-- ===================================
+-- 表示モード（全画面メニュー / タブレットアプリ）
+-- ===================================
+local tabletAppOpen = false
+
+-- タブレットのアプリとして表示するか（タブレットのリソースが起動していなければ全画面メニュー）
+local function IsTabletMode()
+    return GetConfigValue('UI.mode', 'standalone') == 'tablet'
+        and GetResourceState(GetConfigValue('UI.tablet.resource', 'cam_tablet')) == 'started'
+end
+
+local function GetTabletResource()
+    return GetConfigValue('UI.tablet.resource', 'cam_tablet')
+end
+
+local function GetTabletAppId()
+    return GetConfigValue('UI.tablet.app.id', 'racing')
+end
+
+-- タブレットのアプリが開いている/閉じたことを記録
+AddEventHandler(GetTabletResource() .. ':client:appOpened', function(appId)
+    if appId == GetTabletAppId() then tabletAppOpen = true end
+end)
+
+AddEventHandler(GetTabletResource() .. ':client:appClosed', function(appId)
+    if appId == GetTabletAppId() then tabletAppOpen = false end
+end)
+
+AddEventHandler(GetTabletResource() .. ':client:closed', function()
+    tabletAppOpen = false
+end)
+
+-- 安全なNUIメッセージ送信（メニュー画面向け。タブレットモードではアプリへ送る）
 local function SafeSendNUIMessage(data)
-    if isUIOpen then
+    if IsTabletMode() then
+        if tabletAppOpen then
+            exports[GetTabletResource()]:SendAppMessage(GetTabletAppId(), data)
+            DebugLog('Tablet app message sent: ' .. (data.action or 'unknown'))
+        end
+    elseif isUIOpen then
         SendNUIMessage(data)
         DebugLog('NUI Message sent: ' .. (data.action or 'unknown'))
     end
+end
+
+-- メニュー画面を閉じる（レース開始・ダイアログ表示などゲーム画面に戻る時）
+local function CloseMenuUI()
+    if IsTabletMode() then
+        local tablet = exports[GetTabletResource()]
+        if tablet:IsOpen() then tablet:Close() end
+        tabletAppOpen = false
+    else
+        isUIOpen = false
+        SetNuiFocus(false, false)
+    end
+end
+
+-- メニュー画面を開く
+local function OpenMenuUI()
+    if IsTabletMode() then
+        exports[GetTabletResource()]:OpenApp(GetTabletAppId())
+        return
+    end
+    
+    if isUIOpen then
+        DebugLog('UI already open, ignoring')
+        return
+    end
+    
+    DebugLog('Opening racing UI...')
+    
+    lib.callback('qbx_racing:getProfile', false, function(profileData)
+        if profileData then
+            isUIOpen = true
+            SetNuiFocus(true, true)
+            
+            SafeSendNUIMessage({
+                action = 'openUI',
+                hasProfile = profileData.hasProfile,
+                driverName = profileData.driverName,
+                isAdmin = profileData.isAdmin,
+                isRacing = IsCurrentlyRacing and IsCurrentlyRacing() or false
+            })
+            
+            DebugLog('UI opened successfully')
+        else
+            lib.notify({
+                title = 'エラー',
+                description = 'プロフィールデータの取得に失敗しました',
+                type = 'error'
+            })
+            DebugLog('Failed to get profile data')
+        end
+    end)
 end
 
 -- ===================================
@@ -384,36 +472,13 @@ end
 -- メインコマンド登録
 -- ===================================
 RegisterCommand('race', function()
-    if isUIOpen then 
-        DebugLog('UI already open, ignoring command')
-        return 
+    -- タブレットモードで commandOpensApp = false の場合はコマンドを使わない
+    -- （GetConfigValue は false を既定値に置き換えるため直接参照）
+    local tabletConfig = Config.UI and Config.UI.tablet or {}
+    if IsTabletMode() and tabletConfig.commandOpensApp == false then
+        return
     end
-    
-    DebugLog('Opening racing UI...')
-    
-    lib.callback('qbx_racing:getProfile', false, function(profileData)
-        if profileData then
-            isUIOpen = true
-            SetNuiFocus(true, true)
-            
-            SafeSendNUIMessage({
-                action = 'openUI',
-                hasProfile = profileData.hasProfile,
-                driverName = profileData.driverName,
-                isAdmin = profileData.isAdmin,
-                isRacing = IsCurrentlyRacing and IsCurrentlyRacing() or false
-            })
-            
-            DebugLog('UI opened successfully')
-        else
-            lib.notify({
-                title = 'エラー',
-                description = 'プロフィールデータの取得に失敗しました',
-                type = 'error'
-            })
-            DebugLog('Failed to get profile data')
-        end
-    end)
+    OpenMenuUI()
 end)
 
 -- キーバインド登録（オプション）
@@ -425,6 +490,19 @@ end
 -- ===================================
 -- NUIコールバック: 基本操作
 -- ===================================
+
+-- 画面の初期状態（タブレットのアプリが開いた時に取得）
+RegisterNUICallback('getUIState', function(data, cb)
+    lib.callback('qbx_racing:getProfile', false, function(profileData)
+        profileData = profileData or {}
+        cb({
+            hasProfile = profileData.hasProfile or false,
+            driverName = profileData.driverName,
+            isAdmin = profileData.isAdmin or false,
+            isRacing = IsCurrentlyRacing and IsCurrentlyRacing() or false
+        })
+    end)
+end)
 
 -- UI閉じる
 RegisterNUICallback('closeUI', function(data, cb)
@@ -539,8 +617,7 @@ RegisterNUICallback('retireRace', function(data, cb)
     end
     
     -- UIを閉じる
-    isUIOpen = false
-    SetNuiFocus(false, false)
+    CloseMenuUI()
     
     cb({})
 end)
@@ -561,8 +638,7 @@ RegisterNUICallback('startRace', function(data, cb)
     lib.callback('qbx_racing:getRaceDetails', false, function(race)
         if race then
             -- UIを閉じてレース開始
-            isUIOpen = false
-            SetNuiFocus(false, false)
+            CloseMenuUI()
             
             TriggerEvent('qbx_racing:client:startSoloRace', race)
             DebugLog('Solo race started successfully')
@@ -608,8 +684,7 @@ RegisterNUICallback('createSession', function(data, cb)
             sessionParticipants = {}
             
             -- UIを閉じてロビー画面へ
-            isUIOpen = false
-            SetNuiFocus(false, false)
+            CloseMenuUI()
             
             lib.notify({
                 title = 'セッション作成完了',
@@ -648,8 +723,7 @@ RegisterNUICallback('joinSession', function(data, cb)
             sessionParticipants = result.participants or {}
             
             -- UIを閉じてロビー画面へ
-            isUIOpen = false
-            SetNuiFocus(false, false)
+            CloseMenuUI()
             
             lib.notify({
                 title = 'セッション参加完了',
@@ -706,8 +780,7 @@ RegisterNUICallback('createSessionDialog', function(data, cb)
     DebugLog('Opening session create dialog for race: ' .. data.raceId)
     
     -- UIを閉じる（NUI側で既に閉じ処理済みだが念のため）
-    isUIOpen = false
-    SetNuiFocus(false, false)
+    CloseMenuUI()
     
     -- レース情報を取得してセッション作成ダイアログを表示
     lib.callback('qbx_racing:getRaceDetails', false, function(race)
@@ -738,8 +811,7 @@ RegisterNUICallback('joinSessionList', function(data, cb)
     DebugLog('Opening session list for race: ' .. data.raceId)
     
     -- UIを閉じる
-    isUIOpen = false
-    SetNuiFocus(false, false)
+    CloseMenuUI()
     
     -- レース情報を取得してアクティブセッション一覧を表示
     lib.callback('qbx_racing:getRaceDetails', false, function(race)
@@ -767,8 +839,7 @@ RegisterNUICallback('createRace', function(data, cb)
     DebugLog('Starting race creation flow')
     
     -- UIを閉じる
-    isUIOpen = false
-    SetNuiFocus(false, false)
+    CloseMenuUI()
     
     -- レース基本情報入力ダイアログ
     local input = lib.inputDialog('新規レース作成', {
@@ -837,18 +908,7 @@ RegisterNUICallback('createRace', function(data, cb)
     else
         -- キャンセルされた場合はUIを再表示
         DebugLog('Race creation cancelled')
-        lib.callback('qbx_racing:getProfile', false, function(profileData)
-            if profileData then
-                isUIOpen = true
-                SetNuiFocus(true, true)
-                SafeSendNUIMessage({
-                    action = 'openUI',
-                    hasProfile = profileData.hasProfile,
-                    driverName = profileData.driverName,
-                    isAdmin = profileData.isAdmin
-                })
-            end
-        end)
+        OpenMenuUI()
     end
     
     cb({})
