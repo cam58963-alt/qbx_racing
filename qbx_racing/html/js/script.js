@@ -676,6 +676,14 @@ document.addEventListener('DOMContentLoaded', function() {
 // ===================================
 // タブレット (cam_tablet) のアプリとして動かす
 // ===================================
+
+// プロフィール・レース中かどうかなどを取得して画面を表示し直す
+function loadTabletState() {
+    nuiPost('getUIState').then(function(state) {
+        openRacingUI(state || {});
+    });
+}
+
 function initTablet() {
     document.body.classList.add('in-tablet');
     
@@ -684,10 +692,20 @@ function initTablet() {
     sdk.src = `nui://${TABLET_RESOURCE}/html/sdk/cam-tablet.js`;
     sdk.onload = function() {
         CamTablet.on('message', handleMessage);
+        
+        // タブレットは閉じてもこのアプリを残し、開き直すとそのまま再開する。
+        // 表示された時は Lua に知らせて（タブレットを閉じる処理などに使う）、状態を読み直す
+        CamTablet.on('visibility', function(visible) {
+            nuiPost('tabletAppVisible', { visible: visible });
+            if (visible) {
+                isLeaving = false;
+                loadTabletState();
+            }
+        });
+        
         CamTablet.ready(function() {
-            nuiPost('getUIState').then(function(state) {
-                openRacingUI(state || {});
-            });
+            nuiPost('tabletAppVisible', { visible: true });
+            loadTabletState();
         });
     };
     sdk.onerror = function() {

@@ -1385,9 +1385,30 @@ local function RegisterTabletApp()
     local resource = GetCurrentResourceName()
     app.url = ('nui://%s/html/index.html?tablet=%s&resource=%s'):format(resource, tabletResource, resource)
     
-    exports[tabletResource]:RegisterApp(app)
+    -- 同じアプリ ID を別のリソースが使っている場合などは登録を拒否される
+    if exports[tabletResource]:RegisterApp(app) == false then
+        print(('^1[QBX Racing]^7 タブレット (%s) へのアプリ「%s」(id: %s) の登録に失敗しました。'
+            .. 'ID が別のリソースで使われている場合は Config.UI.tablet.app.id を変えるか、'
+            .. 'サーバーコンソールで cam_tablet_releaseid %s を実行してください'):format(tabletResource, app.label, app.id, app.id))
+        return
+    end
     print(('^2[QBX Racing]^7 タブレット (%s) にアプリ「%s」を登録しました'):format(tabletResource, app.label))
 end
+
+-- タブレットにレーシングアプリがインストールされているか（/race で開く前の確認）
+lib.callback.register('qbx_racing:server:hasTabletApp', function(source)
+    local ui = Config.UI or {}
+    local tablet = ui.tablet or {}
+    local tabletResource = tablet.resource or 'cam_tablet'
+    local appId = tablet.app and tablet.app.id or 'racing'
+    if GetResourceState(tabletResource) ~= 'started' then return true end
+    
+    local ok, installed = pcall(function()
+        return exports[tabletResource]:HasApp(source, appId)
+    end)
+    -- 確認できなかった場合はタブレット側の判断に任せる
+    return not ok or installed == true
+end)
 
 -- タブレットが後から起動・再起動した場合も登録する
 AddEventHandler(((Config.UI and Config.UI.tablet and Config.UI.tablet.resource) or 'cam_tablet') .. ':ready', RegisterTabletApp)

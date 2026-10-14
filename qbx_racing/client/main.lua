@@ -127,7 +127,19 @@ local function OpenMenuUI()
     end
     
     if IsTabletMode() then
-        exports[GetTabletResource()]:OpenApp(GetTabletAppId())
+        -- インストールしていないアプリはタブレットが開かないので、先に案内する
+        lib.callback('qbx_racing:server:hasTabletApp', false, function(installed)
+            if not installed then
+                lib.notify({
+                    title = GetConfigValue('UI.tablet.app.label', 'レーシング'),
+                    description = ('タブレットの App Store から「%s」をインストールしてください'):format(
+                        GetConfigValue('UI.tablet.app.label', 'レーシング')),
+                    type = 'inform'
+                })
+                return
+            end
+            exports[GetTabletResource()]:OpenApp(GetTabletAppId())
+        end)
         return
     end
     
@@ -502,6 +514,16 @@ end
 -- ===================================
 -- NUIコールバック: 基本操作
 -- ===================================
+
+-- タブレットのアプリの表示状態（画面側から通知）
+-- タブレットは閉じてもアプリを残して、開き直すとそのまま再開する（その時は appOpened が来ない）ため、
+-- 画面が表示されたことをアプリ自身から受け取って記録する
+RegisterNUICallback('tabletAppVisible', function(data, cb)
+    if IsTabletMode() then
+        tabletAppOpen = data and data.visible == true or false
+    end
+    cb({})
+end)
 
 -- 画面の初期状態（タブレットのアプリが開いた時に取得）
 RegisterNUICallback('getUIState', function(data, cb)
