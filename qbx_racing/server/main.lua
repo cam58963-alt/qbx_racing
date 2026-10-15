@@ -995,31 +995,37 @@ function RegisterSessionParticipant(sessionId, source, options)
 end
 
 -- ロビーから参加者を外す（参加費を返し、DB の行も消す）
+-- 戻り値: 外せたら true（DB に保存できなかった場合はメモリ上もそのまま残す）
 function RemoveLobbyParticipant(sessionId, index)
     local session = ActiveSessions[sessionId]
     local participant = session and session.participants[index]
-    if not participant then return end
-    
-    table.remove(session.participants, index)
-    
+    if not participant then return false end
+
     local refund = participant.entryPaid and session.entryFee > 0
-    if refund then
-        participant.entryPaid = false
-        session.prizePool = math.max(0, session.prizePool - session.entryFee)
-    end
-    
-    -- 行の削除と返金予定の記録を一緒に行ってから返金する
+
+    -- 行の削除と返金予定の記録を一緒に保存できてから、メモリ上の状態を変える
     local recorded = RecordPayouts(sessionId,
         refund and {{citizenid = participant.citizenid, amount = session.entryFee, reason = 'race-entry-refund'}} or {},
         {
             {query = 'DELETE FROM qbx_session_participants WHERE session_id = ? AND citizenid = ?', values = {sessionId, participant.citizenid}},
-            {query = 'UPDATE qbx_race_sessions SET prize_pool = ? WHERE id = ?', values = {session.prizePool, sessionId}}
+            {query = 'UPDATE qbx_race_sessions SET prize_pool = prize_pool - ? WHERE id = ?', values = {refund and session.entryFee or 0, sessionId}}
         })
     if not recorded then
         print(('^1[CAM Racing]^7 セッション %d: %s の退出を保存できませんでした'):format(sessionId, participant.driverName))
-        return
+        return false
     end
-    
+
+    -- DB を待っている間に並びが変わっていることがあるので、本人を探して外す
+    for i = #session.participants, 1, -1 do
+        if session.participants[i] == participant then
+            table.remove(session.participants, i)
+        end
+    end
+    if refund then
+        participant.entryPaid = false
+        session.prizePool = math.max(0, session.prizePool - session.entryFee)
+    end
+
     if refund then
         local src = OnlineSource(participant)
         SettlePayouts(sessionId, {[participant.citizenid] = src})
@@ -1301,15 +1307,16 @@ function StartMultiplayerRace(sessionId, validParticipants)
             SetParticipantStatus(sessionId, participant, 'excluded')
             local refunded = false
             if participant.entryPaid and session.entryFee > 0 then
-                participant.entryPaid = false
-                session.prizePool = math.max(0, session.prizePool - session.entryFee)
-                poolChanged = true
-                -- 「支払い済み」の取り消しと返金予定を一緒に記録してから返金する
+                -- 「支払い済み」の取り消しと返金予定を一緒に保存できてから、メモリ上の状態を変えて返金する
+                -- （保存できなかった場合はそのまま残し、レース終了時の精算で返金する）
                 refunded = RecordPayouts(sessionId,
                     {{citizenid = participant.citizenid, amount = session.entryFee, reason = 'race-entry-refund'}},
                     {{query = 'UPDATE qbx_session_participants SET entry_paid = 0 WHERE session_id = ? AND citizenid = ?',
                       values = {sessionId, participant.citizenid}}})
                 if refunded then
+                    participant.entryPaid = false
+                    session.prizePool = math.max(0, session.prizePool - session.entryFee)
+                    poolChanged = true
                     SettlePayouts(sessionId, {[participant.citizenid] = OnlineSource(participant)})
                 end
             end
@@ -1566,7 +1573,21 @@ end
 -- 戻り値: 支払い予定の一覧, 一緒に実行する DB 更新
 function CalculatePrizes(session)
     local payouts, extraQueries = {}, {}
-    if not session.isBetMode or session.prizePool <= 0 then return payouts, extraQueries end
+    if not session.isBetMode then return payouts, extraQueries end
+
+    -- スタート時に返金を保存できなかった対象外の人は、ここで返金する（賞金プールからは除く）
+    for _, participant in ipairs(session.participants) do
+        if participant.status == 'excluded' and participant.entryPaid and session.entryFee > 0 then
+            participant.entryPaid = false
+            session.prizePool = math.max(0, session.prizePool - session.entryFee)
+            payouts[#payouts + 1] = {citizenid = participant.citizenid, amount = session.entryFee, reason = 'race-entry-refund'}
+            extraQueries[#extraQueries + 1] = {
+                query = 'UPDATE qbx_session_participants SET entry_paid = 0 WHERE session_id = ? AND citizenid = ?',
+                values = {session.id, participant.citizenid}
+            }
+        end
+    end
+    if session.prizePool <= 0 then return payouts, extraQueries end
     
     local finishers = {}
     for _, participant in ipairs(session.participants) do
@@ -1851,9 +1872,16 @@ RegisterNetEvent('qbx_racing:server:leaveSession', function(sessionId)
         return
     end
     
-    RemoveLobbyParticipant(sessionId, index)
+    if not RemoveLobbyParticipant(sessionId, index) then
+        TriggerClientEvent('ox_lib:notify', src, {
+            title = 'エラー',
+            description = '退出の処理に失敗しました。少し待ってからもう一度お試しください',
+            type = 'error'
+        })
+        return
+    end
     BroadcastSessionUpdate(sessionId)
-    
+
     TriggerClientEvent('ox_lib:notify', src, {
         title = 'セッション退出',
         description = 'セッションから退出しました',
