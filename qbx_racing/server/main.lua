@@ -63,6 +63,16 @@ local function ToInteger(value)
     return math.tointeger(n)
 end
 
+-- 文字数（バイト数ではなく）で切り詰める。日本語が途中で切れて不正な文字列にならないように
+-- 文字列でない・UTF-8 として不正な場合は nil
+local function TruncateText(text, maxChars)
+    if type(text) ~= 'string' then return nil end
+    local length = utf8.len(text)
+    if not length then return nil end
+    if length <= maxChars then return text end
+    return text:sub(1, utf8.offset(text, maxChars + 1) - 1)
+end
+
 -- お金を渡す（返金・賞金）
 -- 本人がオンラインならその人に、オフラインなら qbx_core に citizenid で渡す（qbx_core がオフライン保存に対応）
 local function GiveMoney(src, citizenid, amount, reason)
@@ -393,7 +403,7 @@ RegisterNetEvent('qbx_racing:server:createRace', function(data)
     
     local name = type(data.name) == 'string' and data.name:gsub('^%s+', ''):gsub('%s+$', '') or ''
     local nameLength = utf8.len(name) or #name
-    local description = type(data.description) == 'string' and data.description:sub(1, 500) or ''
+    local description = TruncateText(data.description, 500) or ''
     
     local vehicleType = data.vehicleType or 'car'
     if not (Config.VehicleTypes and Config.VehicleTypes[vehicleType]) then vehicleType = nil end
@@ -677,7 +687,7 @@ local function CreateMultiSession(source, data)
         raceId, 
         Player.PlayerData.citizenid, 
         profile.driver_name, 
-        type(data.sessionName) == 'string' and data.sessionName:sub(1, 100) or (race.name .. ' - セッション'),
+        TruncateText(data.sessionName, 100) or (race.name .. ' - セッション'),
         countdownDuration,
         isBetMode and 1 or 0,
         entryFee,
@@ -851,7 +861,7 @@ function RegisterSessionParticipant(sessionId, source, options)
     end
     
     -- 車両名はクライアントから受け取る（車両名を返すネイティブはサーバーにないため）
-    local vehicleModel = type(options.vehicleModel) == 'string' and options.vehicleModel:sub(1, 50) or ''
+    local vehicleModel = TruncateText(options.vehicleModel, 50) or ''
     if vehicleModel == '' then vehicleModel = 'なし' end
     
     -- 先に DB に登録し、成功してから参加費を徴収する（失敗時にお金だけ取られないように）
@@ -897,10 +907,24 @@ function RegisterSessionParticipant(sessionId, source, options)
     
     if entryPaid then
         session.prizePool = session.prizePool + fee
-        MySQL.update('UPDATE qbx_session_participants SET entry_paid = 1 WHERE id = ?', {participantId})
+
+        -- 「支払い済み」を DB に確実に残す（落ちた時の起動時返金はこの記録を見るため）
+        -- 残せなかった場合は参加を取り消して返金する
+        local saved = MySQL.update.await('UPDATE qbx_session_participants SET entry_paid = 1 WHERE id = ?', {participantId})
+        if not saved or saved < 1 then
+            for i = #session.participants, 1, -1 do
+                if session.participants[i].id == participantId then
+                    table.remove(session.participants, i)
+                end
+            end
+            session.prizePool = math.max(0, session.prizePool - fee)
+            MySQL.query('DELETE FROM qbx_session_participants WHERE id = ?', {participantId})
+            GiveMoney(source, citizenid, fee, 'race-entry-refund')
+            return false, '参加処理に失敗しました（参加費は返金しました）'
+        end
         MySQL.update('UPDATE qbx_race_sessions SET prize_pool = ? WHERE id = ?', {session.prizePool, sessionId})
     end
-    
+
     return true
 end
 
@@ -911,8 +935,9 @@ function RemoveLobbyParticipant(sessionId, index)
     if not participant then return end
     
     table.remove(session.participants, index)
-    MySQL.query('DELETE FROM qbx_session_participants WHERE session_id = ? AND citizenid = ?', {sessionId, participant.citizenid})
-    
+    -- 返金より先に行を消す（落ちた時の起動時返金と二重にならないように）
+    MySQL.query.await('DELETE FROM qbx_session_participants WHERE session_id = ? AND citizenid = ?', {sessionId, participant.citizenid})
+
     if participant.entryPaid and session.entryFee > 0 then
         participant.entryPaid = false
         session.prizePool = math.max(0, session.prizePool - session.entryFee)
@@ -1070,17 +1095,29 @@ function SetParticipantStatus(sessionId, participant, status)
         {status, sessionId, participant.citizenid})
 end
 
--- スタート直前に人数が足りなくなった時などのセッション中止（参加費・スポンサー金を返金）
 -- セッション中止（参加費・スポンサー金を返金）
 -- reason が nil のときは通知しない（作成失敗時など）
 function CancelSessionWithRefund(sessionId, reason)
     local session = ActiveSessions[sessionId]
     if not session then return end
-    
+
     ActiveSessions[sessionId] = nil
     session.status = 'cancelled'
-    MySQL.update('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'cancelled', sessionId})
-    
+
+    -- 「中止」を DB に確実に残してから返金する（残らないまま落ちると起動時にもう一度返金されるため。
+    -- 残せなかった場合は返金せず、次回起動時の返金処理に任せる）
+    local saved = MySQL.update.await('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'cancelled', sessionId})
+    if not saved or saved < 1 then
+        print(('^1[CAM Racing]^7 セッション %d の中止を保存できなかったため、返金は次回起動時に行います'):format(sessionId))
+        for _, participant in ipairs(session.participants) do
+            local src = OnlineSource(participant)
+            if src and reason then
+                TriggerClientEvent('qbx_racing:client:sessionCancelled', src, {sessionId = sessionId, reason = reason})
+            end
+        end
+        return
+    end
+
     local hasRefund = session.isBetMode and session.entryFee > 0
     for _, participant in ipairs(session.participants) do
         if participant.entryPaid and session.entryFee > 0 then
@@ -1162,9 +1199,10 @@ function StartMultiplayerRace(sessionId, validParticipants)
                 participant.entryPaid = false
                 session.prizePool = math.max(0, session.prizePool - session.entryFee)
                 poolChanged = true
-                refunded = GiveMoney(OnlineSource(participant), participant.citizenid, session.entryFee, 'race-entry-refund')
-                MySQL.update('UPDATE qbx_session_participants SET entry_paid = 0 WHERE session_id = ? AND citizenid = ?',
+                -- 返金より先に記録を消す（落ちた時の起動時返金と二重にならないように）
+                MySQL.update.await('UPDATE qbx_session_participants SET entry_paid = 0 WHERE session_id = ? AND citizenid = ?',
                     {sessionId, participant.citizenid})
+                refunded = GiveMoney(OnlineSource(participant), participant.citizenid, session.entryFee, 'race-entry-refund')
             end
             
             local src = OnlineSource(participant)
@@ -1310,7 +1348,10 @@ RegisterNetEvent('qbx_racing:server:finishMultiRace', function(sessionId, timeMs
     if not timeMs or math.abs(timeMs - serverElapsed) > 5000 then
         timeMs = serverElapsed
     end
-    vehicleModel = type(vehicleModel) == 'string' and vehicleModel ~= '' and vehicleModel:sub(1, 50) or finisher.vehicleModel or '不明'
+    vehicleModel = TruncateText(vehicleModel, 50)
+    if not vehicleModel or vehicleModel == '' then
+        vehicleModel = finisher.vehicleModel or '不明'
+    end
     
     -- 順位はここで待ちなしに確定させる（切断者がいても順位がずれないようにカウンターで管理）
     session.finishCount = (session.finishCount or 0) + 1
@@ -1388,10 +1429,16 @@ function CheckSessionComplete(sessionId)
     end
     
     session.status = 'finished'
-    MySQL.update('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'finished', sessionId})
-    
-    -- 賞金の支払いと最終結果発表
-    PayoutPrizes(sessionId)
+
+    -- 「終了」を DB に確実に残してから支払う
+    -- （残らないまま落ちると、起動時の返金と賞金の両方が出てしまうため。
+    --   残せなかった場合は支払わず、次回起動時の返金処理に任せる）
+    local saved = MySQL.update.await('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'finished', sessionId})
+    if saved and saved > 0 then
+        PayoutPrizes(sessionId)
+    else
+        print(('^1[CAM Racing]^7 セッション %d の終了を保存できなかったため、賞金を支払いませんでした（次回起動時に参加費を返金します）'):format(sessionId))
+    end
     BroadcastFinalResults(sessionId)
     
     SetTimeout(GetConfigValue('Multiplayer.cleanupDelay', 300000), function()
@@ -1577,7 +1624,10 @@ RegisterNetEvent('qbx_racing:server:finishRace', function(raceId, timeMs, vehicl
     if not timeMs or math.abs(timeMs - serverElapsed) > 5000 then
         timeMs = serverElapsed
     end
-    vehicleModel = type(vehicleModel) == 'string' and vehicleModel ~= '' and vehicleModel:sub(1, 50) or '不明'
+    vehicleModel = TruncateText(vehicleModel, 50)
+    if not vehicleModel or vehicleModel == '' then
+        vehicleModel = '不明'
+    end
     
     -- タイム記録のみ
     MySQL.insert.await([[
