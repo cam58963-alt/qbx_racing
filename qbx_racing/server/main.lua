@@ -1037,6 +1037,8 @@ function RemoveLobbyParticipant(sessionId, index)
             })
         end
     end
+
+    return true
 end
 
 -- セッション更新ブロードキャスト
