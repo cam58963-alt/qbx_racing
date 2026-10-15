@@ -62,6 +62,16 @@ local function GetCurrentVehicleName()
     return GetDisplayNameFromVehicleModel(GetEntityModel(vehicle))
 end
 
+-- サーバーからの問い合わせ: 今乗っている車両のクラス（スタート時の車両チェック用）
+lib.callback.register('qbx_racing:client:getVehicleInfo', function()
+    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    if vehicle == 0 then return nil end
+    return {
+        class = GetVehicleClass(vehicle),
+        netId = NetworkGetNetworkIdFromEntity(vehicle)
+    }
+end)
+
 -- レース中・スタート地点へ移動中・別セッション参加中はマルチプレイに参加できない
 local function CanJoinMultiplayer()
     if isInSession and currentSession then

@@ -1070,22 +1070,21 @@ function GetSessionParticipantList(sessionId)
 end
 
 -- カウントダウン開始
--- 車両クラス → GetVehicleType の種類（サーバーでは車両クラスを取得できないため種類で判定する）
-local VEHICLE_CLASS_TYPES = {
-    [8] = {'bike'}, [13] = {'bike'}, [14] = {'boat', 'submarine'},
-    [15] = {'heli'}, [16] = {'plane'}, [21] = {'train'}
-}
-
-local function GetAllowedVehicleTypes(raceVehicleType)
-    local vehicleConfig = Config.VehicleTypes and Config.VehicleTypes[raceVehicleType]
-    local classes = vehicleConfig and vehicleConfig.allowedClasses or {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
-    local allowed = {}
-    for _, class in ipairs(classes) do
-        for _, vehicleType in ipairs(VEHICLE_CLASS_TYPES[class] or {'automobile'}) do
-            allowed[vehicleType] = true
-        end
+-- 参加者の車両クラスを各クライアントに問い合わせる（車両クラスはサーバーでは取得できないため）
+-- 返事は最大 timeoutMs 待つ。戻り値: source → {class = ..., netId = ...}
+local function RequestVehicleInfo(sources, timeoutMs)
+    local results, pending = {}, #sources
+    for _, src in ipairs(sources) do
+        lib.callback('qbx_racing:client:getVehicleInfo', src, function(info)
+            results[src] = type(info) == 'table' and info or false
+            pending = pending - 1
+        end)
     end
-    return allowed
+    local deadline = GetGameTimer() + timeoutMs
+    while pending > 0 and GetGameTimer() < deadline do
+        Wait(100)
+    end
+    return results
 end
 
 RegisterNetEvent('qbx_racing:server:startCountdown', function(sessionId)
@@ -1106,15 +1105,39 @@ RegisterNetEvent('qbx_racing:server:startCountdown', function(sessionId)
         return
     end
     
-    -- 有効な参加者をチェック（対象車両に乗ってスタート地点付近にいる人）
+    -- 確認中に開始ボタンを連打されても二重に始めない
+    if session.checkingStart then return end
+    session.checkingStart = true
+    
+    -- 有効な参加者をチェック（対象クラスの車両に乗ってスタート地点付近にいる人）
     local startRadius = GetConfigValue('Multiplayer.countdownRestrictions.startAreaRadius', 30.0)
     local startCoords = session.startPoint and vector3(session.startPoint.x, session.startPoint.y, session.startPoint.z)
-    local allowedTypes = GetAllowedVehicleTypes(session.race.vehicle_type)
-    local validParticipants = {}
+    local vehicleConfig = Config.VehicleTypes and Config.VehicleTypes[session.race.vehicle_type]
+    local allowedClasses = {}
+    for _, class in ipairs(vehicleConfig and vehicleConfig.allowedClasses or {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}) do
+        allowedClasses[class] = true
+    end
+    
+    local onlineSources = {}
     for _, participant in ipairs(session.participants) do
         if not participant.disconnected then
+            table.insert(onlineSources, participant.source)
+        end
+    end
+    local vehicleInfo = RequestVehicleInfo(onlineSources, 3000)
+    session.checkingStart = nil
+    
+    -- 問い合わせ中にセッションが変わっていたらやめる
+    if ActiveSessions[sessionId] ~= session or session.status ~= 'lobby' then return end
+    
+    local validParticipants = {}
+    for _, participant in ipairs(session.participants) do
+        local info = vehicleInfo[participant.source]
+        if not participant.disconnected and info then
+            -- クライアントが答えた車両が、サーバーから見て実際に乗っている車両か確認する
             local vehicle = GetVehiclePedIsIn(GetPlayerPed(participant.source), false)
-            if vehicle ~= 0 and allowedTypes[GetVehicleType(vehicle)]
+            local reported = ToInteger(info.netId) and NetworkGetEntityFromNetworkId(ToInteger(info.netId)) or 0
+            if vehicle ~= 0 and reported == vehicle and allowedClasses[ToInteger(info.class)]
                 and (not startCoords or #(GetEntityCoords(vehicle) - startCoords) <= startRadius) then
                 table.insert(validParticipants, participant.source)
             end
