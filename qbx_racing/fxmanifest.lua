@@ -2,8 +2,8 @@ fx_version 'cerulean'
 game 'gta5'
 lua54 'yes'
 
-author 'QBX Racing Team'
-description 'QBX Racing System - Complete Multiplayer Racing with Ghost Mode'
+author 'CAM Racing Team'
+description 'CAM Racing System - Complete Multiplayer Racing with Ghost Mode'
 version '4.2.0'
 
 shared_scripts {

@@ -1,5 +1,5 @@
 // html/js/script.js
-// QBX Racing System - NUI Script v4.2.0
+// CAM Racing System - NUI Script v4.2.0
 
 let currentRaces = [];
 let filteredRaces = [];
@@ -709,7 +709,7 @@ function initTablet() {
         });
     };
     sdk.onerror = function() {
-        console.error(`[QBX Racing] タブレットの SDK を読み込めません: ${sdk.src}`);
+        console.error(`[CAM Racing] タブレットの SDK を読み込めません: ${sdk.src}`);
     };
     document.head.appendChild(sdk);
 }

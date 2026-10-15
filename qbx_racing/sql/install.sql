@@ -1,5 +1,5 @@
 -- ===================================
--- QBX Racing System - Database Schema
+-- CAM Racing System - Database Schema
 -- v4.2.0
 -- 新規インストール: CREATE TABLE で全カラム作成
 -- 既存v4.0以前からの更新: 末尾の ALTER TABLE で不足カラムを安全に追加

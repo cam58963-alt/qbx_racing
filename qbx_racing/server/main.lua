@@ -1,5 +1,5 @@
 -- ===================================
--- QBX Racing System - Server Main
+-- CAM Racing System - Server Main
 -- 完全統合版 v4.2.0
 -- ===================================
 
@@ -128,7 +128,7 @@ end
 lib.callback.register('qbx_racing:getProfile', function(source)
     local Player = GetPlayer(source)
     if not Player then 
-        print('^1[QBX Racing]^7 プレイヤーデータ取得失敗: ' .. tostring(source))
+        print('^1[CAM Racing]^7 プレイヤーデータ取得失敗: ' .. tostring(source))
         return nil 
     end
     
@@ -295,7 +295,7 @@ RegisterNetEvent('qbx_racing:server:createRace', function(data)
     local Player = GetPlayer(src)
     
     if not Player then
-        print('^1[QBX Racing]^7 レース作成: プレイヤーデータなし')
+        print('^1[CAM Racing]^7 レース作成: プレイヤーデータなし')
         return
     end
     
@@ -407,10 +407,29 @@ end)
 -- ===================================
 -- セッション作成（スポンサー機能対応）
 -- ===================================
+-- 他のセッションに参加中（ロビー〜レース中）かどうか
+function FindPlayerActiveSession(src)
+    for sessionId, session in pairs(ActiveSessions) do
+        if session.status == 'lobby' or session.status == 'countdown' or session.status == 'racing' then
+            for _, participant in ipairs(session.participants) do
+                if participant.source == src and participant.status ~= 'excluded' and participant.status ~= 'retired'
+                    and participant.status ~= 'finished' then
+                    return sessionId
+                end
+            end
+        end
+    end
+    return nil
+end
+
 lib.callback.register('qbx_racing:server:createMultiSession', function(source, data)
     local Player = GetPlayer(source)
     if not Player then 
         return {success = false, message = 'プレイヤーデータが見つかりません'} 
+    end
+    
+    if FindPlayerActiveSession(source) then
+        return {success = false, message = '既に別のセッションに参加しています'}
     end
     
     local profile = GetDriverProfile(Player.PlayerData.citizenid)
@@ -519,7 +538,7 @@ lib.callback.register('qbx_racing:server:createMultiSession', function(source, d
                 ]], {sessionId, Player.PlayerData.citizenid, profile.driver_name, sponsorAmount})
                 
                 -- 成功ログ
-                print(string.format('[QBX Racing] スポンサー記録: %s が $%d をセッション %d に提供', 
+                print(string.format('[CAM Racing] スポンサー記録: %s が $%d をセッション %d に提供', 
                     profile.driver_name, sponsorAmount, sessionId))
             else
                 -- 支払い失敗時はセッション削除
@@ -552,6 +571,8 @@ lib.callback.register('qbx_racing:server:createMultiSession', function(source, d
         
         -- 主催者を自動参加
         if RegisterSessionParticipant(sessionId, source, {isHost = true}) then
+            -- 主催者のロビーに自分を表示する
+            BroadcastSessionUpdate(sessionId)
             return {
                 success = true, 
                 sessionId = sessionId,
@@ -577,6 +598,10 @@ lib.callback.register('qbx_racing:server:joinSession', function(source, sessionI
     
     if session.status ~= 'lobby' then
         return {success = false, message = 'このセッションは既に開始されています'}
+    end
+    
+    if FindPlayerActiveSession(source) then
+        return {success = false, message = '既に別のセッションに参加しています'}
     end
     
     local maxParticipants = Config.Multiplayer and Config.Multiplayer.maxParticipants or 16
@@ -784,9 +809,11 @@ RegisterNetEvent('qbx_racing:server:startCountdown', function(sessionId)
     
     if #validParticipants < minParticipants then
         session.status = 'lobby'
+        MySQL.update.await('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'lobby', sessionId})
         TriggerClientEvent('ox_lib:notify', src, {
             title = 'エラー',
-            description = '有効な参加者が不足しています',
+            description = string.format('レースに出られる参加者が%d人です（最低%d人）。全員が対象の車両に乗っているか確認してください',
+                #validParticipants, minParticipants),
             type = 'error'
         })
         return
@@ -834,25 +861,47 @@ function StartMultiplayerRace(sessionId, validParticipants)
     session.startTime = os.time()
     
     MySQL.update.await('UPDATE qbx_race_sessions SET status = ?, start_time = NOW() WHERE id = ?', {'racing', sessionId})
-    MySQL.update.await('UPDATE qbx_session_participants SET status = ? WHERE session_id = ?', {'racing', sessionId})
     
-    -- 参加者ステータス更新
+    -- 参加者ステータス更新（車両に乗っていなかった人などはレースに出られない）
+    local isValid = {}
+    for _, participantSource in ipairs(validParticipants) do
+        isValid[participantSource] = true
+    end
+    
+    local racers = {}
     for _, participant in ipairs(session.participants) do
-        participant.status = 'racing'
+        if participant.status == 'retired' then
+            -- カウントダウン中に退出した人
+        elseif isValid[participant.source] then
+            table.insert(racers, participant.source)
+            participant.status = 'racing'
+            MySQL.update.await('UPDATE qbx_session_participants SET status = ? WHERE session_id = ? AND citizenid = ?',
+                {'racing', sessionId, participant.citizenid})
+        else
+            -- 走らない人が 'racing' のまま残るとレースが終わらないため、対象外にする
+            participant.status = 'excluded'
+            TriggerClientEvent('qbx_racing:client:sessionCancelled', participant.source, {
+                sessionId = sessionId,
+                reason = 'スタート時に対象の車両に乗っていなかったため、レースに参加できませんでした'
+            })
+        end
     end
     
     -- 全参加者にレース開始通知
-    for _, participantSource in ipairs(validParticipants) do
+    for _, participantSource in ipairs(racers) do
         TriggerClientEvent('qbx_racing:client:multiRaceStart', participantSource, {
             sessionId = sessionId,
             race = session.race,
-            participants = validParticipants,
+            participants = racers,
             isMultiplayer = true
         })
     end
     
     -- 進捗同期スレッド開始
     StartProgressSyncThread(sessionId)
+    
+    -- カウントダウン中に全員抜けていた場合など
+    CheckSessionComplete(sessionId)
 end
 
 -- 進捗同期スレッド
@@ -863,7 +912,7 @@ function StartProgressSyncThread(sessionId)
         
         local syncInterval = Config.Multiplayer and Config.Multiplayer.progressSyncInterval or 500
         
-        while session.status == 'racing' do
+        while session.status == 'racing' and ActiveSessions[sessionId] == session do
             local progressData = {}
             
             for _, participant in ipairs(session.participants) do
@@ -920,6 +969,16 @@ RegisterNetEvent('qbx_racing:server:finishMultiRace', function(sessionId, timeMs
     
     local profile = GetDriverProfile(Player.PlayerData.citizenid)
     if not profile then return end
+    
+    -- 走行中の参加者からのゴールだけ受け付ける（二重のゴールや不参加者による賞金の受け取りを防ぐ）
+    local finisher = nil
+    for _, participant in ipairs(session.participants) do
+        if participant.source == src then
+            finisher = participant
+            break
+        end
+    end
+    if session.status ~= 'racing' or not finisher or finisher.status ~= 'racing' then return end
     
     -- 順位計算
     local finishedCount = 0
@@ -1055,25 +1114,48 @@ RegisterNetEvent('qbx_racing:server:finishMultiRace', function(sessionId, timeMs
     end
     
     -- 全員完了チェックと最終結果
-    local allFinished = true
+    CheckSessionComplete(sessionId)
+end)
+
+-- 走行中の参加者がいなくなったらレースを終了して最終結果を発表する
+-- （ゴール・リタイア・退出・切断のたびに呼ぶ）
+function CheckSessionComplete(sessionId)
+    local session = ActiveSessions[sessionId]
+    if not session or session.status ~= 'racing' then return end
+    
     for _, participant in ipairs(session.participants) do
         if participant.status == 'racing' then
-            allFinished = false
+            return
+        end
+    end
+    
+    session.status = 'finished'
+    MySQL.update.await('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'finished', sessionId})
+    
+    -- 最終結果発表（スポンサー情報含む）
+    BroadcastFinalResults(sessionId)
+    
+    SetTimeout(300000, function()
+        if ActiveSessions[sessionId] == session then
+            ActiveSessions[sessionId] = nil
+        end
+    end)
+end
+
+-- レース中のリタイア
+RegisterNetEvent('qbx_racing:server:retireRace', function(sessionId)
+    local src = source
+    local session = ActiveSessions[sessionId]
+    if not session or session.status ~= 'racing' then return end
+    
+    for _, participant in ipairs(session.participants) do
+        if participant.source == src and participant.status == 'racing' then
+            participant.status = 'retired'
             break
         end
     end
     
-    if allFinished then
-        session.status = 'finished'
-        MySQL.update.await('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'finished', sessionId})
-        
-        -- 最終結果発表（スポンサー情報含む）
-        BroadcastFinalResults(sessionId)
-        
-        SetTimeout(300000, function()
-            ActiveSessions[sessionId] = nil
-        end)
-    end
+    CheckSessionComplete(sessionId)
 end)
 
 -- (FormatMoney はヘルパー関数セクションで定義済み)
@@ -1182,7 +1264,7 @@ lib.callback.register('qbx_racing:server:deleteRace', function(source, raceId)
     local success = MySQL.update.await('UPDATE qbx_races SET is_active = 0 WHERE id = ?', {raceId})
     
     if success then
-        print(string.format('[QBX Racing] レース削除: ID=%d, Name=%s, 実行者=%s', raceId, race.name, tostring(source)))
+        print(string.format('[CAM Racing] レース削除: ID=%d, Name=%s, 実行者=%s', raceId, race.name, tostring(source)))
         
         TriggerClientEvent('ox_lib:notify', source, {
             title = '削除完了',
@@ -1206,6 +1288,17 @@ RegisterNetEvent('qbx_racing:server:leaveSession', function(sessionId)
     local src = source
     local session = ActiveSessions[sessionId]
     if not session then return end
+    
+    -- ロビー以外（カウントダウン・レース中）の退出はリタイア扱い（途中でセッションを解散・返金しない）
+    if session.status ~= 'lobby' then
+        for _, participant in ipairs(session.participants) do
+            if participant.source == src and participant.status ~= 'finished' and participant.status ~= 'excluded' then
+                participant.status = 'retired'
+            end
+        end
+        CheckSessionComplete(sessionId)
+        return
+    end
     
     for i, participant in ipairs(session.participants) do
         if participant.source == src then
@@ -1350,7 +1443,7 @@ function StartSessionTimeoutThread()
                         end
                     end
                     
-                    print(string.format('[QBX Racing] セッションタイムアウト: ID=%d (%d秒経過)', sessionId, sessionTimeout))
+                    print(string.format('[CAM Racing] セッションタイムアウト: ID=%d (%d秒経過)', sessionId, sessionTimeout))
                     ActiveSessions[sessionId] = nil
                 end
             end
@@ -1387,12 +1480,12 @@ local function RegisterTabletApp()
     
     -- 同じアプリ ID を別のリソースが使っている場合などは登録を拒否される
     if exports[tabletResource]:RegisterApp(app) == false then
-        print(('^1[QBX Racing]^7 タブレット (%s) へのアプリ「%s」(id: %s) の登録に失敗しました。'
+        print(('^1[CAM Racing]^7 タブレット (%s) へのアプリ「%s」(id: %s) の登録に失敗しました。'
             .. 'ID が別のリソースで使われている場合は Config.UI.tablet.app.id を変えるか、'
             .. 'サーバーコンソールで cam_tablet_releaseid %s を実行してください'):format(tabletResource, app.label, app.id, app.id))
         return
     end
-    print(('^2[QBX Racing]^7 タブレット (%s) にアプリ「%s」を登録しました'):format(tabletResource, app.label))
+    print(('^2[CAM Racing]^7 タブレット (%s) にアプリ「%s」を登録しました'):format(tabletResource, app.label))
 end
 
 -- タブレットにレーシングアプリがインストールされているか（/race で開く前の確認）
@@ -1418,7 +1511,7 @@ CreateThread(RegisterTabletApp)
 AddEventHandler('onResourceStart', function(resourceName)
     if GetCurrentResourceName() ~= resourceName then return end
     
-    print('^2[QBX Racing]^7 サーバーサイド起動完了')
+    print('^2[CAM Racing]^7 サーバーサイド起動完了')
     
     -- 曲がり角ガイドのテーブルを作成（既存サーバー向け）
     MySQL.query.await([[
@@ -1444,7 +1537,7 @@ AddEventHandler('onResourceStart', function(resourceName)
     if tonumber(hasSegments) == 0 then
         MySQL.query.await('ALTER TABLE `qbx_race_turn_guides` ADD COLUMN `segments` INT DEFAULT 1 AFTER `direction`')
     end
-    print('^2[QBX Racing]^7 マルチプレイヤーシステム: ' .. 
+    print('^2[CAM Racing]^7 マルチプレイヤーシステム: ' .. 
           (Config.Multiplayer and Config.Multiplayer.enabled and '有効' or '無効'))
     
     -- 既存のセッションクリーンアップ
@@ -1464,7 +1557,7 @@ AddEventHandler('onResourceStop', function(resourceName)
         MySQL.update.await('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'cancelled', sessionId})
     end
     
-    print('^1[QBX Racing]^7 サーバーサイド停止完了')
+    print('^1[CAM Racing]^7 サーバーサイド停止完了')
 end)
 
 -- プレイヤー切断時のクリーンアップ
@@ -1478,8 +1571,11 @@ AddEventHandler('playerDropped', function(reason)
                 -- ロビー中の参加費返金は不要（切断なので送金先がない）
                 table.remove(session.participants, i)
                 
+                -- レース中・カウントダウン中の切断はリタイア扱い（主催者でもセッションは続ける）
+                if session.status == 'racing' or session.status == 'countdown' then
+                    CheckSessionComplete(sessionId)
                 -- 主催者が切断した場合はセッション終了
-                if session.host == src then
+                elseif session.host == src then
                     session.status = 'cancelled'
                     MySQL.update.await('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'cancelled', sessionId})
                     

@@ -1,5 +1,5 @@
 -- ===================================
--- QBX Racing System - Custom Checkpoint Markers
+-- CAM Racing System - Custom Checkpoint Markers
 -- 自作画像のチェックポイントマーカー描画
 -- ===================================
 
@@ -14,7 +14,7 @@ local function LoadMarkerTextures()
 
     -- 次のCPとゴールの画像がないと表示が消えるため、標準チェックポイントに戻す
     if not markerConfig.styles.checkpoint or not markerConfig.styles.finish then
-        print('^3[QBX Racing]^7 customMarker.styles に checkpoint / finish がないため、標準チェックポイントを使用します')
+        print('^3[CAM Racing]^7 customMarker.styles に checkpoint / finish がないため、標準チェックポイントを使用します')
         return
     end
 
