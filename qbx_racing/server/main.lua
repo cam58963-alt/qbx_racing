@@ -180,8 +180,9 @@ local function CalculateMinRaceTimeMs(race)
     for i = 2, #checkpoints do
         lapDistance = lapDistance + dist(checkpoints[i - 1], checkpoints[i])
     end
+    -- 周回は毎周スタート地点（CP1）に戻る（最終周もスタート地点がゴール）
     local closing = (race.race_type ~= 'sprint' and #checkpoints > 1) and dist(checkpoints[#checkpoints], checkpoints[1]) or 0
-    local total = lapDistance * laps + closing * (laps - 1)
+    local total = lapDistance * laps + closing * laps
     
     -- チェックポイントの判定半径ぶんの近道を差し引く
     for _, cp in ipairs(checkpoints) do
@@ -1318,6 +1319,8 @@ function StartMultiplayerRace(sessionId, validParticipants)
     session.finishCount = 0
     session.checkpointCount = #(session.race.checkpoints or {})
     session.totalLaps = session.race.race_type == 'sprint' and 1 or math.max(1, ToInteger(session.race.laps) or 1)
+    -- 1周の最後の番号（周回は n+1 = スタート地点に戻る。最終周はそこがゴール）
+    session.lapEndIndex = session.race.race_type == 'sprint' and session.checkpointCount or session.checkpointCount + 1
     session.minFinishMs = CalculateMinRaceTimeMs(session.race)
     
     MySQL.update('UPDATE qbx_race_sessions SET status = ?, start_time = NOW() WHERE id = ?', {'racing', sessionId})
@@ -1451,11 +1454,12 @@ RegisterNetEvent('qbx_racing:server:updateProgress', function(sessionId, checkpo
     if not participant or participant.status ~= 'racing' or not checkpoint or not lap then return end
     
     -- チェックポイントは1つずつ順番にしか進めない（飛ばした報告は受け付けない）
+    -- 周回は CPn の次に n+1（スタート地点に戻る）、そこを通ると次の周の CP2
     local nextCheckpoint, nextLap
-    if participant.currentCheckpoint > session.checkpointCount then
-        nextCheckpoint, nextLap = 2, participant.currentLap + 1
-    else
+    if participant.currentCheckpoint < session.lapEndIndex then
         nextCheckpoint, nextLap = participant.currentCheckpoint + 1, participant.currentLap
+    else
+        nextCheckpoint, nextLap = 2, participant.currentLap + 1
     end
     
     if checkpoint == nextCheckpoint and lap == nextLap and lap <= session.totalLaps then
@@ -1476,8 +1480,8 @@ RegisterNetEvent('qbx_racing:server:finishMultiRace', function(sessionId, timeMs
     local finisher = FindParticipant(session, src)
     if not finisher or finisher.status ~= 'racing' then return end
     
-    -- 全チェックポイントを順番に通過したか（サーバーが受け取った進捗で確認）
-    if finisher.currentLap ~= session.totalLaps or finisher.currentCheckpoint ~= session.checkpointCount + 1 then
+    -- 最終周のゴール直前まで順番に通過したか（サーバーが受け取った進捗で確認。ゴールの通過はこの報告自体）
+    if finisher.currentLap ~= session.totalLaps or finisher.currentCheckpoint ~= session.lapEndIndex then
         print(('^3[CAM Racing]^7 ゴールを受け付けませんでした（チェックポイント未通過）: %s session=%d'):format(
             finisher.driverName, sessionId))
         return

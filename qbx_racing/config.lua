@@ -374,6 +374,12 @@ Config.Race = {
     -- カウントダウン
     countdownSeconds = 3,        -- ソロレースのカウントダウン時間（スタート地点到着後）
     
+    -- レース中の車両乗り換えチェック（スタート時の車両以外で走るとリタイア）
+    vehicleSwapCheck = {
+        enabled = true,
+        graceSeconds = 10        -- 降りたり乗り換えたりしてから、元の車両に戻るまでの猶予（秒）
+    },
+    
     -- 基本報酬（練習・タイムアタック用）
     baseRewards = {
         enabled = false,          -- 基本報酬を有効にするか
