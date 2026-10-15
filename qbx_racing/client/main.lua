@@ -1556,6 +1556,23 @@ RegisterNetEvent('qbx_racing:client:multiRaceStart', function(data)
     end
 end)
 
+-- 退出に失敗した（サーバーではまだ参加中）→ セッションに戻してロビーを開き直す
+RegisterNetEvent('qbx_racing:client:leaveFailed', function(data)
+    if isInSession and currentSession and currentSession ~= data.sessionId then return end
+
+    currentSession = data.sessionId
+    isInSession = true
+    sessionStatus = 'lobby'
+    sessionParticipants = data.participants or {}
+
+    lib.notify({
+        title = 'エラー',
+        description = '退出の処理に失敗しました。少し待ってからもう一度お試しください',
+        type = 'error'
+    })
+    ShowSessionLobby(data.sessionId, false, nil)
+end)
+
 -- セッションキャンセル通知（タイムアウト・主催者退出など）
 RegisterNetEvent('qbx_racing:client:sessionCancelled', function(data)
     if data.sessionId == currentSession then

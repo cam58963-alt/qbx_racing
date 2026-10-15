@@ -995,15 +995,24 @@ function RegisterSessionParticipant(sessionId, source, options)
 end
 
 -- ロビーから参加者を外す（参加費を返し、DB の行も消す）
--- 戻り値: 外せたら true（DB に保存できなかった場合はメモリ上もそのまま残す）
+-- 戻り値: 外せたら true / 既に退出処理中なら 'busy' / DB に保存できなかったら false（メモリ上もそのまま残す）
 function RemoveLobbyParticipant(sessionId, index)
     local session = ActiveSessions[sessionId]
     local participant = session and session.participants[index]
     if not participant then return false end
+    -- 退出処理中に同じ人の退出（連打・切断）が来ても二重に返金しない
+    if participant.removing then return 'busy' end
+    participant.removing = true
 
+    -- DB を待っている間に中止処理などが同じ参加費を返金しないよう、先にメモリ上で「返金対象」を確保する
+    -- （保存に失敗したら元に戻す）
     local refund = participant.entryPaid and session.entryFee > 0
+    if refund then
+        participant.entryPaid = false
+        session.prizePool = math.max(0, session.prizePool - session.entryFee)
+    end
 
-    -- 行の削除と返金予定の記録を一緒に保存できてから、メモリ上の状態を変える
+    -- 行の削除と返金予定の記録を一緒に保存する
     local recorded = RecordPayouts(sessionId,
         refund and {{citizenid = participant.citizenid, amount = session.entryFee, reason = 'race-entry-refund'}} or {},
         {
@@ -1012,6 +1021,11 @@ function RemoveLobbyParticipant(sessionId, index)
         })
     if not recorded then
         print(('^1[CAM Racing]^7 セッション %d: %s の退出を保存できませんでした'):format(sessionId, participant.driverName))
+        participant.removing = nil
+        if refund then
+            participant.entryPaid = true
+            session.prizePool = session.prizePool + session.entryFee
+        end
         return false
     end
 
@@ -1020,10 +1034,6 @@ function RemoveLobbyParticipant(sessionId, index)
         if session.participants[i] == participant then
             table.remove(session.participants, i)
         end
-    end
-    if refund then
-        participant.entryPaid = false
-        session.prizePool = math.max(0, session.prizePool - session.entryFee)
     end
 
     if refund then
@@ -1309,17 +1319,21 @@ function StartMultiplayerRace(sessionId, validParticipants)
             SetParticipantStatus(sessionId, participant, 'excluded')
             local refunded = false
             if participant.entryPaid and session.entryFee > 0 then
-                -- 「支払い済み」の取り消しと返金予定を一緒に保存できてから、メモリ上の状態を変えて返金する
-                -- （保存できなかった場合はそのまま残し、レース終了時の精算で返金する）
+                -- DB を待つ間に他の処理が同じ参加費を返金しないよう、先にメモリ上で確保してから
+                -- 「支払い済み」の取り消しと返金予定を一緒に保存する
+                -- （保存できなかった場合は元に戻し、レース終了時の精算で返金する）
+                participant.entryPaid = false
+                session.prizePool = math.max(0, session.prizePool - session.entryFee)
                 refunded = RecordPayouts(sessionId,
                     {{citizenid = participant.citizenid, amount = session.entryFee, reason = 'race-entry-refund'}},
                     {{query = 'UPDATE qbx_session_participants SET entry_paid = 0 WHERE session_id = ? AND citizenid = ?',
                       values = {sessionId, participant.citizenid}}})
                 if refunded then
-                    participant.entryPaid = false
-                    session.prizePool = math.max(0, session.prizePool - session.entryFee)
                     poolChanged = true
                     SettlePayouts(sessionId, {[participant.citizenid] = OnlineSource(participant)})
+                else
+                    participant.entryPaid = true
+                    session.prizePool = session.prizePool + session.entryFee
                 end
             end
             
@@ -1874,11 +1888,13 @@ RegisterNetEvent('qbx_racing:server:leaveSession', function(sessionId)
         return
     end
     
-    if not RemoveLobbyParticipant(sessionId, index) then
-        TriggerClientEvent('ox_lib:notify', src, {
-            title = 'エラー',
-            description = '退出の処理に失敗しました。少し待ってからもう一度お試しください',
-            type = 'error'
+    local removed = RemoveLobbyParticipant(sessionId, index)
+    if removed == 'busy' then return end -- 退出処理中（連打）
+    if not removed then
+        -- クライアントは退出したつもりなので、セッションに戻してロビーを開き直してもらう
+        TriggerClientEvent('qbx_racing:client:leaveFailed', src, {
+            sessionId = sessionId,
+            participants = GetSessionParticipantList(sessionId)
         })
         return
     end
