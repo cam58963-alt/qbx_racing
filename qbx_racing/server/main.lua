@@ -854,15 +854,49 @@ RegisterNetEvent('qbx_racing:server:startCountdown', function(sessionId)
     end)
 end)
 
+-- 参加者のステータスを変更（メモリと DB の両方）
+function SetParticipantStatus(sessionId, participant, status)
+    participant.status = status
+    MySQL.update('UPDATE qbx_session_participants SET status = ? WHERE session_id = ? AND citizenid = ?',
+        {status, sessionId, participant.citizenid})
+end
+
+-- スタート直前に人数が足りなくなった時などのセッション中止（参加費・スポンサー金を返金）
+function CancelSessionWithRefund(sessionId, reason)
+    local session = ActiveSessions[sessionId]
+    if not session then return end
+    
+    session.status = 'cancelled'
+    MySQL.update.await('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'cancelled', sessionId})
+    local currency = GetConfigValue('Race.currency', 'cash')
+    
+    for _, p in ipairs(session.participants) do
+        if session.isBetMode and p.entryPaid and session.entryFee > 0 then
+            local pPlayer = GetPlayer(p.source)
+            if pPlayer then
+                pPlayer.Functions.AddMoney(currency, session.entryFee, 'race-entry-refund')
+            end
+        end
+        TriggerClientEvent('qbx_racing:client:sessionCancelled', p.source, {
+            sessionId = sessionId,
+            reason = reason .. (session.isBetMode and '（参加費は返金済み）' or '')
+        })
+    end
+    
+    if session.sponsorAmount and session.sponsorAmount > 0 and session.host then
+        local hostPlayer = GetPlayer(session.host)
+        if hostPlayer then
+            hostPlayer.Functions.AddMoney(currency, session.sponsorAmount, 'race-sponsor-refund')
+        end
+    end
+    
+    ActiveSessions[sessionId] = nil
+end
+
 -- マルチプレイヤーレース開始
 function StartMultiplayerRace(sessionId, validParticipants)
     local session = ActiveSessions[sessionId]
     if not session then return end
-    
-    session.status = 'racing'
-    session.startTime = os.time()
-    
-    MySQL.update.await('UPDATE qbx_race_sessions SET status = ?, start_time = NOW() WHERE id = ?', {'racing', sessionId})
     
     -- 参加者ステータス更新（車両に乗っていなかった人などはレースに出られない）
     local isValid = {}
@@ -870,18 +904,34 @@ function StartMultiplayerRace(sessionId, validParticipants)
         isValid[participantSource] = true
     end
     
+    -- カウントダウン中の退出・切断で最低人数を下回った場合は中止
+    local racerCount = 0
+    for _, participant in ipairs(session.participants) do
+        if participant.status ~= 'retired' and isValid[participant.source] then
+            racerCount = racerCount + 1
+        end
+    end
+    local minParticipants = Config.Multiplayer and Config.Multiplayer.minParticipants or 2
+    if racerCount < minParticipants then
+        CancelSessionWithRefund(sessionId, string.format('カウントダウン中に参加者が抜けて%d人未満になったため、レースを中止しました', minParticipants))
+        return
+    end
+    
+    session.status = 'racing'
+    session.startTime = os.time()
+    
+    MySQL.update.await('UPDATE qbx_race_sessions SET status = ?, start_time = NOW() WHERE id = ?', {'racing', sessionId})
+    
     local racers = {}
     for _, participant in ipairs(session.participants) do
         if participant.status == 'retired' then
             -- カウントダウン中に退出した人
         elseif isValid[participant.source] then
             table.insert(racers, participant.source)
-            participant.status = 'racing'
-            MySQL.update.await('UPDATE qbx_session_participants SET status = ? WHERE session_id = ? AND citizenid = ?',
-                {'racing', sessionId, participant.citizenid})
+            SetParticipantStatus(sessionId, participant, 'racing')
         else
             -- 走らない人が 'racing' のまま残るとレースが終わらないため、対象外にする
-            participant.status = 'excluded'
+            SetParticipantStatus(sessionId, participant, 'excluded')
             TriggerClientEvent('qbx_racing:client:sessionCancelled', participant.source, {
                 sessionId = sessionId,
                 reason = 'スタート時に対象の車両でスタート地点付近にいなかったため、レースに参加できませんでした'
@@ -1152,7 +1202,7 @@ RegisterNetEvent('qbx_racing:server:retireRace', function(sessionId)
     
     for _, participant in ipairs(session.participants) do
         if participant.source == src and participant.status == 'racing' then
-            participant.status = 'retired'
+            SetParticipantStatus(sessionId, participant, 'retired')
             break
         end
     end
@@ -1295,7 +1345,7 @@ RegisterNetEvent('qbx_racing:server:leaveSession', function(sessionId)
     if session.status ~= 'lobby' then
         for _, participant in ipairs(session.participants) do
             if participant.source == src and participant.status ~= 'finished' and participant.status ~= 'excluded' then
-                participant.status = 'retired'
+                SetParticipantStatus(sessionId, participant, 'retired')
             end
         end
         CheckSessionComplete(sessionId)
@@ -1539,6 +1589,15 @@ AddEventHandler('onResourceStart', function(resourceName)
     if tonumber(hasSegments) == 0 then
         MySQL.query.await('ALTER TABLE `qbx_race_turn_guides` ADD COLUMN `segments` INT DEFAULT 1 AFTER `direction`')
     end
+    -- 参加者ステータスにリタイア・対象外を追加（既存サーバー向け）
+    local statusType = MySQL.scalar.await([[
+        SELECT COLUMN_TYPE FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'qbx_session_participants' AND COLUMN_NAME = 'status'
+    ]])
+    if statusType and not tostring(statusType):find('retired', 1, true) then
+        MySQL.query.await([[ALTER TABLE `qbx_session_participants` MODIFY COLUMN `status`
+            ENUM('entered', 'ready', 'racing', 'finished', 'retired', 'excluded') DEFAULT 'entered']])
+    end
     print('^2[CAM Racing]^7 マルチプレイヤーシステム: ' .. 
           (Config.Multiplayer and Config.Multiplayer.enabled and '有効' or '無効'))
     
@@ -1571,6 +1630,9 @@ AddEventHandler('playerDropped', function(reason)
         for i, participant in ipairs(session.participants) do
             if participant.source == src then
                 -- ロビー中の参加費返金は不要（切断なので送金先がない）
+                if session.status == 'racing' and participant.status == 'racing' then
+                    SetParticipantStatus(sessionId, participant, 'retired')
+                end
                 table.remove(session.participants, i)
                 
                 -- レース中・カウントダウン中の切断はリタイア扱い（主催者でもセッションは続ける）

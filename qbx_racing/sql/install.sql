@@ -108,7 +108,7 @@ CREATE TABLE IF NOT EXISTS `qbx_session_participants` (
     `citizenid` VARCHAR(50) NOT NULL,
     `driver_name` VARCHAR(50) NOT NULL,
     `vehicle_model` VARCHAR(50),
-    `status` ENUM('entered', 'ready', 'racing', 'finished') DEFAULT 'entered',
+    `status` ENUM('entered', 'ready', 'racing', 'finished', 'retired', 'excluded') DEFAULT 'entered',
     `current_checkpoint` INT DEFAULT 1,
     `current_lap` INT DEFAULT 1,
     `finish_time_ms` INT NULL,
@@ -192,6 +192,10 @@ CALL qbx_racing_safe_add_column('qbx_race_sessions', 'house_cut', 'INT DEFAULT 0
 -- qbx_session_participants: 支払い・賞金関連カラム
 CALL qbx_racing_safe_add_column('qbx_session_participants', 'entry_paid', 'TINYINT(1) DEFAULT 0 AFTER `final_position`');
 CALL qbx_racing_safe_add_column('qbx_session_participants', 'prize_amount', 'INT DEFAULT 0 AFTER `entry_paid`');
+
+-- qbx_session_participants: リタイア・対象外のステータス
+ALTER TABLE `qbx_session_participants` MODIFY COLUMN `status`
+    ENUM('entered', 'ready', 'racing', 'finished', 'retired', 'excluded') DEFAULT 'entered';
 
 -- qbx_race_turn_guides: 横に長いガイド（並べる矢印の数）
 CALL qbx_racing_safe_add_column('qbx_race_turn_guides', 'segments', 'INT DEFAULT 1 AFTER `direction`');
