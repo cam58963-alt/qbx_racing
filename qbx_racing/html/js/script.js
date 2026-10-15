@@ -81,7 +81,14 @@ function nuiPost(endpoint, data) {
 // ===================================
 // UI開閉
 // ===================================
+let uiHideTimer = null;
+let detailHideTimer = null;
+
 function openRacingUI(data) {
+    // 閉じるアニメーション中に開き直した場合、後から非表示にされないようにする
+    clearTimeout(uiHideTimer);
+    document.body.classList.add('menu-open');
+    
     const ui = document.getElementById('racing-ui');
     ui.style.display = 'flex';
     ui.style.opacity = '0';
@@ -89,6 +96,18 @@ function openRacingUI(data) {
         ui.style.transition = 'opacity 0.3s ease';
         ui.style.opacity = '1';
     });
+    
+    if (data.racesPerPage > 0) {
+        racesPerPage = data.racesPerPage;
+    }
+    
+    // プロフィールを取得できなかった（ログイン直後など）は「未登録」と区別して案内する
+    if (data.error) {
+        document.getElementById('main-screen').style.display = 'none';
+        document.getElementById('driver-setup-modal').style.display = 'none';
+        showToast('プロフィールを取得できませんでした。少し待ってから開き直してください');
+        return;
+    }
     
     if (data.hasProfile) {
         document.getElementById('current-driver-name').textContent = data.driverName;
@@ -119,14 +138,17 @@ function openRacingUI(data) {
 function closeRacingUI() {
     // タブレットではアプリを閉じてホームに戻る
     if (IS_TABLET) {
-        CamTablet.home();
+        if (typeof CamTablet !== 'undefined') CamTablet.home();
         return;
     }
     
+    closeAskModal(null);
+    document.body.classList.remove('menu-open');
     const ui = document.getElementById('racing-ui');
     ui.style.transition = 'opacity 0.25s ease';
     ui.style.opacity = '0';
-    setTimeout(() => {
+    clearTimeout(uiHideTimer);
+    uiHideTimer = setTimeout(() => {
         ui.style.display = 'none';
     }, 250);
     nuiPost('closeUI');
@@ -149,19 +171,69 @@ function leaveRacingUI() {
     closeRacingUI();
 }
 
-// 入力・確認ダイアログ（タブレットでは SDK のダイアログを使う）
+// 入力・確認ダイアログ（タブレットでは SDK のダイアログ、全画面メニューでは自前のダイアログ）
+// ※ ゲーム内の画面（NUI）では prompt / confirm が動かないため
+let askResolve = null;
+let askMode = 'confirm';
+
+function openAskModal(mode, title, message, value, okLabel) {
+    return new Promise(resolve => {
+        closeAskModal(null); // 前のダイアログはキャンセル扱い
+        askResolve = resolve;
+        askMode = mode;
+        
+        document.getElementById('ask-title').textContent = title;
+        const messageEl = document.getElementById('ask-message');
+        messageEl.textContent = message || '';
+        messageEl.style.display = message ? '' : 'none';
+        
+        const input = document.getElementById('ask-input');
+        document.getElementById('ask-input-group').style.display = mode === 'text' ? '' : 'none';
+        input.value = value || '';
+        document.getElementById('ask-ok-btn').textContent = okLabel || 'OK';
+        
+        document.getElementById('ask-modal').style.display = 'flex';
+        if (mode === 'text') setTimeout(() => input.focus(), 0);
+    });
+}
+
+function closeAskModal(result) {
+    const modal = document.getElementById('ask-modal');
+    if (modal) modal.style.display = 'none';
+    const resolve = askResolve;
+    askResolve = null;
+    if (resolve) resolve(result);
+}
+
+function isAskModalOpen() {
+    const modal = document.getElementById('ask-modal');
+    return !!modal && modal.style.display !== 'none';
+}
+
 function askText(title, value) {
-    if (IS_TABLET) {
+    if (IS_TABLET && typeof CamTablet !== 'undefined') {
         return CamTablet.prompt({ title: title, value: value });
     }
-    return Promise.resolve(prompt(title, value));
+    return openAskModal('text', title, '', value, 'OK');
 }
 
 function askConfirm(title, message) {
-    if (IS_TABLET) {
+    if (IS_TABLET && typeof CamTablet !== 'undefined') {
         return CamTablet.confirm({ title: title, message: message, okLabel: '削除', danger: true });
     }
-    return Promise.resolve(confirm(title + '\n' + message));
+    return openAskModal('confirm', title, message, '', '削除').then(result => result === true);
+}
+
+// エラーなどのお知らせ（画面下に数秒表示）
+let toastTimer = null;
+function showToast(message, type) {
+    const toast = document.getElementById('ui-toast');
+    if (!toast || !message) return;
+    toast.textContent = message;
+    toast.className = 'ui-toast' + (type === 'success' ? ' success' : '');
+    toast.style.display = 'block';
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { toast.style.display = 'none'; }, 4000);
 }
 
 function showDriverSetup() {
@@ -329,8 +401,11 @@ function showRaceDetail(raceId) {
     const deleteBtn = document.getElementById('delete-race-btn');
     deleteBtn.style.display = isAdmin ? 'block' : 'none';
     
+    // 前に開いたレースのランキングが残らないように消してから読み込む
+    document.getElementById('leaderboard-list').innerHTML = '';
     loadLeaderboard(raceId);
     
+    clearTimeout(detailHideTimer);
     const modal = document.getElementById('race-detail-modal');
     modal.style.display = 'flex';
     modal.style.opacity = '0';
@@ -344,7 +419,8 @@ function closeDetailModal() {
     const modal = document.getElementById('race-detail-modal');
     modal.style.transition = 'opacity 0.2s ease';
     modal.style.opacity = '0';
-    setTimeout(() => {
+    clearTimeout(detailHideTimer);
+    detailHideTimer = setTimeout(() => {
         modal.style.display = 'none';
     }, 200);
     selectedRaceId = null;
@@ -355,6 +431,8 @@ function closeDetailModal() {
 // ===================================
 function loadLeaderboard(raceId) {
     nuiPost('getLeaderboard', { raceId: raceId }).then(leaderboard => {
+        // 返事が来る前に別のレースを開いていたら表示しない
+        if (selectedRaceId !== raceId) return;
         displayLeaderboard(leaderboard || []);
     });
 }
@@ -548,6 +626,7 @@ document.addEventListener('DOMContentLoaded', function() {
             } else {
                 input.style.borderColor = '#ef4444';
                 input.style.boxShadow = '0 0 0 3px rgba(239, 68, 68, 0.2)';
+                showToast((result && result.message) || '登録に失敗しました');
             }
         }).finally(() => {
             btn.disabled = false;
@@ -567,13 +646,18 @@ document.addEventListener('DOMContentLoaded', function() {
         const currentName = document.getElementById('current-driver-name').textContent;
         const newName = await askText('新しいドライバーネームを入力してください', currentName);
         
-        if (newName && validateDriverName(newName)) {
-            nuiPost('updateDriverName', { driverName: newName }).then(result => {
-                if (result && result.success) {
-                    document.getElementById('current-driver-name').textContent = result.driverName;
-                }
-            });
+        if (!newName || newName === currentName) return;
+        if (!validateDriverName(newName)) {
+            showToast('ドライバーネームは3〜20文字の英数字とアンダースコアで入力してください');
+            return;
         }
+        nuiPost('updateDriverName', { driverName: newName }).then(result => {
+            if (result && result.success) {
+                document.getElementById('current-driver-name').textContent = result.driverName;
+            } else {
+                showToast((result && result.message) || 'ドライバーネームを変更できませんでした');
+            }
+        });
     });
     
     // スタート地点ウェイポイント設置
@@ -624,6 +708,8 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (result && result.success) {
                     closeDetailModal();
                     loadRaces();
+                } else {
+                    showToast((result && result.message) || 'レースを削除できませんでした');
                 }
             }).finally(() => {
                 btn.disabled = false;
@@ -652,6 +738,10 @@ document.addEventListener('DOMContentLoaded', function() {
     document.addEventListener('keydown', function(e) {
         if (IS_TABLET) return;
         if (e.key === 'Escape') {
+            if (isAskModalOpen()) {
+                closeAskModal(askMode === 'text' ? null : false);
+                return;
+            }
             const detailModal = document.getElementById('race-detail-modal');
             if (detailModal.style.display !== 'none' && detailModal.style.display !== '') {
                 closeDetailModal();
@@ -659,6 +749,17 @@ document.addEventListener('DOMContentLoaded', function() {
                 closeRacingUI();
             }
         }
+    });
+    
+    // 入力・確認ダイアログのボタン
+    document.getElementById('ask-ok-btn').addEventListener('click', function() {
+        closeAskModal(askMode === 'text' ? document.getElementById('ask-input').value.trim() : true);
+    });
+    document.getElementById('ask-cancel-btn').addEventListener('click', function() {
+        closeAskModal(askMode === 'text' ? null : false);
+    });
+    document.getElementById('ask-input').addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') document.getElementById('ask-ok-btn').click();
     });
     
     // レースキャンセルボタン（/race UI内）
@@ -710,6 +811,9 @@ function initTablet() {
     };
     sdk.onerror = function() {
         console.error(`[CAM Racing] タブレットの SDK を読み込めません: ${sdk.src}`);
+        // SDK なしでも一覧は見られるようにする（タブレットのダイアログ等は使えない）
+        loadTabletState();
+        showToast('タブレットとの連携に失敗しました。タブレットを開き直してください');
     };
     document.head.appendChild(sdk);
 }
