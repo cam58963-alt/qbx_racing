@@ -145,6 +145,20 @@ CREATE TABLE IF NOT EXISTS `qbx_race_sponsors` (
     INDEX `idx_amount` (`amount`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- 支払い台帳（返金・賞金を「予定を記録 → 1件ずつ支払い済みにして渡す」ことで、
+-- サーバーが途中で落ちても未払い分は次回起動時に支払い、二重には払わない）
+CREATE TABLE IF NOT EXISTS `qbx_race_payouts` (
+    `id` INT AUTO_INCREMENT PRIMARY KEY,
+    `session_id` INT NOT NULL,
+    `citizenid` VARCHAR(50) NOT NULL,
+    `amount` INT NOT NULL,
+    `reason` VARCHAR(50) NOT NULL,
+    `paid` TINYINT(1) DEFAULT 0,
+    `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX `idx_unpaid` (`paid`),
+    INDEX `idx_session` (`session_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 
 -- ===================================
 -- v4.0以前 → v4.2.0 マイグレーション

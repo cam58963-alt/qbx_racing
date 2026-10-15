@@ -98,6 +98,55 @@ local function GiveMoney(src, citizenid, amount, reason)
     return false
 end
 
+-- ===================================
+-- 支払い台帳（qbx_race_payouts）
+-- 返金・賞金は「先に DB へ支払い予定を記録 → 1件ずつ支払い済みにしてから渡す」。
+-- 途中でサーバーが落ちても、未払いの予定は次回起動時に支払われ、二重には払われない。
+-- ===================================
+
+-- 支払い予定を記録する。extraQueries（状態の更新など）も同じトランザクションで実行する
+-- payouts: { {citizenid = ..., amount = ..., reason = ...}, ... }
+local function RecordPayouts(sessionId, payouts, extraQueries)
+    local queries = {}
+    for _, query in ipairs(extraQueries or {}) do
+        queries[#queries + 1] = query
+    end
+    for _, payout in ipairs(payouts or {}) do
+        local amount = ToInteger(payout.amount)
+        if amount and amount > 0 and payout.citizenid then
+            queries[#queries + 1] = {
+                query = 'INSERT INTO qbx_race_payouts (session_id, citizenid, amount, reason) VALUES (?, ?, ?, ?)',
+                values = {sessionId, payout.citizenid, amount, payout.reason or 'race-payout'}
+            }
+        end
+    end
+    if #queries == 0 then return true end
+    return MySQL.transaction.await(queries) and true or false
+end
+
+-- 未払いの支払い予定を実行する（sessionId が nil なら全セッション分）
+-- sources: citizenid → source（オンラインの人に直接渡すため。無ければ citizenid で渡す）
+local function SettlePayouts(sessionId, sources)
+    local rows
+    if sessionId then
+        rows = MySQL.query.await('SELECT id, citizenid, amount, reason FROM qbx_race_payouts WHERE session_id = ? AND paid = 0', {sessionId})
+    else
+        rows = MySQL.query.await('SELECT id, citizenid, amount, reason FROM qbx_race_payouts WHERE paid = 0')
+    end
+    
+    for _, row in ipairs(rows or {}) do
+        -- 先に「支払い済み」にできた分だけ渡す（同じ予定を二重に払わない）
+        local claimed = MySQL.update.await('UPDATE qbx_race_payouts SET paid = 1 WHERE id = ? AND paid = 0', {row.id})
+        if claimed and claimed > 0 then
+            local src = sources and sources[row.citizenid]
+            if not GiveMoney(src, row.citizenid, row.amount, row.reason) then
+                -- 渡せなかった分は未払いに戻して、次回起動時にもう一度試す
+                MySQL.update('UPDATE qbx_race_payouts SET paid = 0 WHERE id = ?', {row.id})
+            end
+        end
+    end
+end
+
 -- 同じプレイヤーのセッション作成・参加が同時に走らないようにする（DB 待ちの間の二重課金防止）
 local busyPlayers = {}
 local function RunExclusive(src, fn)
@@ -576,6 +625,18 @@ local function HostSource(session)
     return session.host
 end
 
+-- citizenid → source（オンラインの参加者と主催者）
+local function SessionSources(session)
+    local sources = {}
+    if session.hostCitizenid then
+        sources[session.hostCitizenid] = HostSource(session)
+    end
+    for _, participant in ipairs(session.participants) do
+        sources[participant.citizenid] = OnlineSource(participant)
+    end
+    return sources
+end
+
 local function CreateMultiSession(source, data)
     local Player = GetPlayer(source)
     if not Player then 
@@ -709,11 +770,16 @@ local function CreateMultiSession(source, data)
             return {success = false, message = 'スポンサー金の支払いに失敗しました'}
         end
         
-        -- スポンサー履歴に記録
-        MySQL.insert([[
+        -- スポンサー履歴に記録（起動時の返金はこの記録がある分だけ返す = 実際に払った分だけ）
+        local recorded = MySQL.insert.await([[
             INSERT INTO qbx_race_sponsors (session_id, sponsor_citizenid, sponsor_driver_name, amount, sponsor_type) 
             VALUES (?, ?, ?, ?, 'host')
         ]], {sessionId, Player.PlayerData.citizenid, profile.driver_name, sponsorAmount})
+        if not recorded then
+            GiveMoney(source, Player.PlayerData.citizenid, sponsorAmount, 'race-sponsor-refund')
+            MySQL.query.await('DELETE FROM qbx_race_sessions WHERE id = ?', {sessionId})
+            return {success = false, message = 'セッション作成に失敗しました（スポンサー金は返金しました）'}
+        end
         
         print(string.format('[CAM Racing] スポンサー記録: %s が $%s をセッション %d に提供', 
             profile.driver_name, FormatMoney(sponsorAmount), sessionId))
@@ -935,16 +1001,29 @@ function RemoveLobbyParticipant(sessionId, index)
     if not participant then return end
     
     table.remove(session.participants, index)
-    -- 返金より先に行を消す（落ちた時の起動時返金と二重にならないように）
-    MySQL.query.await('DELETE FROM qbx_session_participants WHERE session_id = ? AND citizenid = ?', {sessionId, participant.citizenid})
-
-    if participant.entryPaid and session.entryFee > 0 then
+    
+    local refund = participant.entryPaid and session.entryFee > 0
+    if refund then
         participant.entryPaid = false
         session.prizePool = math.max(0, session.prizePool - session.entryFee)
-        MySQL.update('UPDATE qbx_race_sessions SET prize_pool = ? WHERE id = ?', {session.prizePool, sessionId})
-        
+    end
+    
+    -- 行の削除と返金予定の記録を一緒に行ってから返金する
+    local recorded = RecordPayouts(sessionId,
+        refund and {{citizenid = participant.citizenid, amount = session.entryFee, reason = 'race-entry-refund'}} or {},
+        {
+            {query = 'DELETE FROM qbx_session_participants WHERE session_id = ? AND citizenid = ?', values = {sessionId, participant.citizenid}},
+            {query = 'UPDATE qbx_race_sessions SET prize_pool = ? WHERE id = ?', values = {session.prizePool, sessionId}}
+        })
+    if not recorded then
+        print(('^1[CAM Racing]^7 セッション %d: %s の退出を保存できませんでした'):format(sessionId, participant.driverName))
+        return
+    end
+    
+    if refund then
         local src = OnlineSource(participant)
-        if GiveMoney(src, participant.citizenid, session.entryFee, 'race-entry-refund') and src then
+        SettlePayouts(sessionId, {[participant.citizenid] = src})
+        if src then
             TriggerClientEvent('ox_lib:notify', src, {
                 title = '返金',
                 description = string.format('参加費$%sを返金しました', FormatMoney(session.entryFee)),
@@ -1100,31 +1179,34 @@ end
 function CancelSessionWithRefund(sessionId, reason)
     local session = ActiveSessions[sessionId]
     if not session then return end
-
+    
     ActiveSessions[sessionId] = nil
     session.status = 'cancelled'
-
-    -- 「中止」を DB に確実に残してから返金する（残らないまま落ちると起動時にもう一度返金されるため。
-    -- 残せなかった場合は返金せず、次回起動時の返金処理に任せる）
-    local saved = MySQL.update.await('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'cancelled', sessionId})
-    if not saved or saved < 1 then
-        print(('^1[CAM Racing]^7 セッション %d の中止を保存できなかったため、返金は次回起動時に行います'):format(sessionId))
-        for _, participant in ipairs(session.participants) do
-            local src = OnlineSource(participant)
-            if src and reason then
-                TriggerClientEvent('qbx_racing:client:sessionCancelled', src, {sessionId = sessionId, reason = reason})
-            end
-        end
-        return
-    end
-
-    local hasRefund = session.isBetMode and session.entryFee > 0
+    
+    -- 返金予定と「中止」を一緒に記録してから返金する
+    -- （記録できなかった場合は DB 上はまだ進行中なので、次回起動時の返金処理に任せる）
+    local payouts = {}
     for _, participant in ipairs(session.participants) do
         if participant.entryPaid and session.entryFee > 0 then
             participant.entryPaid = false
-            GiveMoney(OnlineSource(participant), participant.citizenid, session.entryFee, 'race-entry-refund')
+            payouts[#payouts + 1] = {citizenid = participant.citizenid, amount = session.entryFee, reason = 'race-entry-refund'}
         end
-        
+    end
+    if session.sponsorAmount and session.sponsorAmount > 0 then
+        payouts[#payouts + 1] = {citizenid = session.hostCitizenid, amount = session.sponsorAmount, reason = 'race-sponsor-refund'}
+    end
+    
+    local recorded = RecordPayouts(sessionId, payouts, {
+        {query = 'UPDATE qbx_race_sessions SET status = ? WHERE id = ?', values = {'cancelled', sessionId}}
+    })
+    if recorded then
+        SettlePayouts(sessionId, SessionSources(session))
+    else
+        print(('^1[CAM Racing]^7 セッション %d の中止を保存できなかったため、返金は次回起動時に行います'):format(sessionId))
+    end
+    
+    local hasRefund = recorded and session.isBetMode and session.entryFee > 0
+    for _, participant in ipairs(session.participants) do
         local src = OnlineSource(participant)
         if src and reason then
             TriggerClientEvent('qbx_racing:client:sessionCancelled', src, {
@@ -1134,9 +1216,9 @@ function CancelSessionWithRefund(sessionId, reason)
         end
     end
     
-    if session.sponsorAmount and session.sponsorAmount > 0 then
+    if recorded and session.sponsorAmount and session.sponsorAmount > 0 then
         local hostSrc = HostSource(session)
-        if GiveMoney(hostSrc, session.hostCitizenid, session.sponsorAmount, 'race-sponsor-refund') and hostSrc and reason then
+        if hostSrc and reason then
             TriggerClientEvent('ox_lib:notify', hostSrc, {
                 title = '返金',
                 description = string.format('スポンサー金$%sを返金しました', FormatMoney(session.sponsorAmount)),
@@ -1199,10 +1281,14 @@ function StartMultiplayerRace(sessionId, validParticipants)
                 participant.entryPaid = false
                 session.prizePool = math.max(0, session.prizePool - session.entryFee)
                 poolChanged = true
-                -- 返金より先に記録を消す（落ちた時の起動時返金と二重にならないように）
-                MySQL.update.await('UPDATE qbx_session_participants SET entry_paid = 0 WHERE session_id = ? AND citizenid = ?',
-                    {sessionId, participant.citizenid})
-                refunded = GiveMoney(OnlineSource(participant), participant.citizenid, session.entryFee, 'race-entry-refund')
+                -- 「支払い済み」の取り消しと返金予定を一緒に記録してから返金する
+                refunded = RecordPayouts(sessionId,
+                    {{citizenid = participant.citizenid, amount = session.entryFee, reason = 'race-entry-refund'}},
+                    {{query = 'UPDATE qbx_session_participants SET entry_paid = 0 WHERE session_id = ? AND citizenid = ?',
+                      values = {sessionId, participant.citizenid}}})
+                if refunded then
+                    SettlePayouts(sessionId, {[participant.citizenid] = OnlineSource(participant)})
+                end
             end
             
             local src = OnlineSource(participant)
@@ -1429,15 +1515,17 @@ function CheckSessionComplete(sessionId)
     end
     
     session.status = 'finished'
-
-    -- 「終了」を DB に確実に残してから支払う
-    -- （残らないまま落ちると、起動時の返金と賞金の両方が出てしまうため。
-    --   残せなかった場合は支払わず、次回起動時の返金処理に任せる）
-    local saved = MySQL.update.await('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'finished', sessionId})
-    if saved and saved > 0 then
-        PayoutPrizes(sessionId)
+    
+    -- 賞金（または全員リタイア時の返金）の予定と「終了」を一緒に記録してから支払う
+    -- （記録できなかった場合は DB 上はまだ進行中なので、次回起動時に参加費を返金する）
+    local payouts, extraQueries = CalculatePrizes(session)
+    table.insert(extraQueries, 1, {query = 'UPDATE qbx_race_sessions SET status = ? WHERE id = ?', values = {'finished', sessionId}})
+    if RecordPayouts(sessionId, payouts, extraQueries) then
+        SettlePayouts(sessionId, SessionSources(session))
+        PayHouseCut(session)
     else
-        print(('^1[CAM Racing]^7 セッション %d の終了を保存できなかったため、賞金を支払いませんでした（次回起動時に参加費を返金します）'):format(sessionId))
+        session.prizesFailed = true
+        print(('^1[CAM Racing]^7 セッション %d の結果を保存できなかったため、賞金を支払いませんでした（次回起動時に参加費を返金します）'):format(sessionId))
     end
     BroadcastFinalResults(sessionId)
     
@@ -1450,9 +1538,12 @@ end
 
 -- 賞金の支払い（レース終了時にまとめて）
 -- 入賞者が配分表より少ない場合（2人レースなど）は、実際の入賞者の割合でプール全額を分ける
-function PayoutPrizes(sessionId)
-    local session = ActiveSessions[sessionId]
-    if not session or not session.isBetMode or session.prizePool <= 0 then return end
+-- 賞金の計算（支払いは CheckSessionComplete が台帳経由で行う）
+-- 入賞者が配分表より少ない場合（2人レースなど）は、実際の入賞者の割合でプール全額を分ける
+-- 戻り値: 支払い予定の一覧, 一緒に実行する DB 更新
+function CalculatePrizes(session)
+    local payouts, extraQueries = {}, {}
+    if not session.isBetMode or session.prizePool <= 0 then return payouts, extraQueries end
     
     local finishers = {}
     for _, participant in ipairs(session.participants) do
@@ -1467,44 +1558,54 @@ function PayoutPrizes(sessionId)
         for _, participant in ipairs(session.participants) do
             if participant.entryPaid and session.entryFee > 0 then
                 participant.entryPaid = false
-                GiveMoney(OnlineSource(participant), participant.citizenid, session.entryFee, 'race-entry-refund')
+                payouts[#payouts + 1] = {citizenid = participant.citizenid, amount = session.entryFee, reason = 'race-entry-refund'}
             end
         end
         if session.sponsorAmount > 0 then
-            GiveMoney(HostSource(session), session.hostCitizenid, session.sponsorAmount, 'race-sponsor-refund')
+            payouts[#payouts + 1] = {citizenid = session.hostCitizenid, amount = session.sponsorAmount, reason = 'race-sponsor-refund'}
         end
         session.refundedAll = true
-        return
+        return payouts, extraQueries
     end
     
-    -- ハウスカット（1レースにつき1回）
+    -- ハウスカット（1レースにつき1回。支払いは PayHouseCut）
     local houseCutConfig = GetConfigValue('Race.betting.houseCut', {enabled = false})
-    local houseCutAmount = 0
+    session.houseCutAmount = 0
     if type(houseCutConfig) == 'table' and houseCutConfig.enabled then
-        houseCutAmount = math.floor(session.prizePool * (houseCutConfig.percentage or 10) / 100)
+        session.houseCutAmount = math.floor(session.prizePool * (houseCutConfig.percentage or 10) / 100)
     end
-    local distributionPool = session.prizePool - houseCutAmount
+    local distributionPool = session.prizePool - session.houseCutAmount
     
     local distribution = GetConfigValue('Race.betting.distribution', {[1] = 50, [2] = 30, [3] = 20})
     local totalShare = 0
     for _, participant in ipairs(finishers) do
         totalShare = totalShare + (distribution[participant.position] or 0)
     end
-    if totalShare <= 0 then return end
+    if totalShare <= 0 then return payouts, extraQueries end
     
     for _, participant in ipairs(finishers) do
         local share = distribution[participant.position] or 0
         local prize = math.floor(distributionPool * share / totalShare)
-        if prize > 0 and GiveMoney(OnlineSource(participant), participant.citizenid, prize, 'race-prize') then
+        if prize > 0 then
             participant.prize = prize
-            MySQL.update('UPDATE qbx_session_participants SET prize_amount = ? WHERE session_id = ? AND citizenid = ?',
-                {prize, sessionId, participant.citizenid})
+            payouts[#payouts + 1] = {citizenid = participant.citizenid, amount = prize, reason = 'race-prize'}
+            extraQueries[#extraQueries + 1] = {
+                query = 'UPDATE qbx_session_participants SET prize_amount = ? WHERE session_id = ? AND citizenid = ?',
+                values = {prize, session.id, participant.citizenid}
+            }
         end
     end
     
-    if houseCutAmount > 0 and houseCutConfig.recipient == 'society' and houseCutConfig.societyName then
+    return payouts, extraQueries
+end
+
+-- ハウスカットの支払い（設定で有効な場合のみ）
+function PayHouseCut(session)
+    local houseCutConfig = GetConfigValue('Race.betting.houseCut', {enabled = false})
+    if (session.houseCutAmount or 0) > 0 and type(houseCutConfig) == 'table'
+        and houseCutConfig.recipient == 'society' and houseCutConfig.societyName then
         pcall(function()
-            exports['qb-management']:AddMoney(houseCutConfig.societyName, houseCutAmount)
+            exports['qb-management']:AddMoney(houseCutConfig.societyName, session.houseCutAmount)
         end)
     end
 end
@@ -1559,7 +1660,9 @@ function BroadcastFinalResults(sessionId)
     end
     
     if session.isBetMode and session.prizePool > 0 then
-        if session.refundedAll then
+        if session.prizesFailed then
+            summary = summary .. '\n⚠️ 結果を保存できなかったため、賞金の代わりに参加費を後で返金します'
+        elseif session.refundedAll then
             summary = summary .. '\n💰 ゴールした人がいなかったため、参加費とスポンサー金を返金しました'
         else
             summary = summary .. string.format('\n💰 総賞金プール: $%s', FormatMoney(session.prizePool))
@@ -1875,27 +1978,54 @@ AddEventHandler('onResourceStart', function(resourceName)
     print('^2[CAM Racing]^7 マルチプレイヤーシステム: ' .. 
           (Config.Multiplayer and Config.Multiplayer.enabled and '有効' or '無効'))
     
-    -- 前回サーバーが落ちたときに終わっていなかった掛けレースの参加費・スポンサー金を返金
+    -- 支払い台帳（返金・賞金を確実に1回だけ払うため）
+    MySQL.query.await([[
+        CREATE TABLE IF NOT EXISTS `qbx_race_payouts` (
+            `id` INT AUTO_INCREMENT PRIMARY KEY,
+            `session_id` INT NOT NULL,
+            `citizenid` VARCHAR(50) NOT NULL,
+            `amount` INT NOT NULL,
+            `reason` VARCHAR(50) NOT NULL,
+            `paid` TINYINT(1) DEFAULT 0,
+            `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX `idx_unpaid` (`paid`),
+            INDEX `idx_session` (`session_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ]])
+    
+    -- 前回サーバーが落ちたときに終わっていなかったセッション →
+    -- 参加費（支払い済みの記録がある分）とスポンサー金（スポンサー履歴がある分）の返金予定を記録して中止にする
     local staleSessions = MySQL.query.await([[
-        SELECT id, entry_fee, sponsor_amount, sponsor_citizenid FROM qbx_race_sessions
-        WHERE status IN ('lobby', 'countdown', 'racing') AND is_bet_mode = 1
+        SELECT id, entry_fee FROM qbx_race_sessions WHERE status IN ('lobby', 'countdown', 'racing')
     ]]) or {}
     for _, stale in ipairs(staleSessions) do
-        if (tonumber(stale.entry_fee) or 0) > 0 then
+        local payouts = {}
+        local entryFee = ToInteger(stale.entry_fee) or 0
+        if entryFee > 0 then
             local paid = MySQL.query.await([[
                 SELECT citizenid FROM qbx_session_participants WHERE session_id = ? AND entry_paid = 1
             ]], {stale.id}) or {}
             for _, row in ipairs(paid) do
-                GiveMoney(nil, row.citizenid, stale.entry_fee, 'race-entry-refund')
+                payouts[#payouts + 1] = {citizenid = row.citizenid, amount = entryFee, reason = 'race-entry-refund'}
             end
         end
-        if (tonumber(stale.sponsor_amount) or 0) > 0 and stale.sponsor_citizenid then
-            GiveMoney(nil, stale.sponsor_citizenid, stale.sponsor_amount, 'race-sponsor-refund')
+        local sponsors = MySQL.query.await([[
+            SELECT sponsor_citizenid, SUM(amount) AS amount FROM qbx_race_sponsors
+            WHERE session_id = ? AND sponsor_type = 'host' GROUP BY sponsor_citizenid
+        ]], {stale.id}) or {}
+        for _, row in ipairs(sponsors) do
+            payouts[#payouts + 1] = {citizenid = row.sponsor_citizenid, amount = row.amount, reason = 'race-sponsor-refund'}
+        end
+        
+        if not RecordPayouts(stale.id, payouts, {
+            {query = "UPDATE qbx_race_sessions SET status = 'cancelled' WHERE id = ? AND status IN ('lobby', 'countdown', 'racing')", values = {stale.id}}
+        }) then
+            print(('^1[CAM Racing]^7 セッション %d の返金予定を記録できませんでした（次回起動時に再試行します）'):format(stale.id))
         end
     end
     
-    -- 既存のセッションクリーンアップ
-    MySQL.update.await("UPDATE qbx_race_sessions SET status = 'cancelled' WHERE status IN ('lobby', 'countdown', 'racing')")
+    -- 未払いの返金・賞金をすべて支払う（前回の途中で止まった分も含む）
+    SettlePayouts(nil)
     ActiveSessions = {}
     
     -- セッションタイムアウト管理スレッド開始
