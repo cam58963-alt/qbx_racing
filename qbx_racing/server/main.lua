@@ -82,8 +82,8 @@ local function GiveMoney(src, citizenid, amount, reason)
     
     local Player = src and GetPlayer(src)
     if Player and (not citizenid or Player.PlayerData.citizenid == citizenid) then
-        Player.Functions.AddMoney(currency, amount, reason)
-        return true
+        -- 失敗（お金の種類が無いなど）は台帳に伝えて、未払いに戻してもらう
+        return Player.Functions.AddMoney(currency, amount, reason) ~= false
     end
     
     if citizenid then
@@ -1495,24 +1495,25 @@ RegisterNetEvent('qbx_racing:server:finishMultiRace', function(sessionId, timeMs
         session.firstFinishAt = GetGameTimer()
     end
     
-    -- データベース更新
-    MySQL.update([[
-        UPDATE qbx_session_participants 
-        SET status = 'finished', finish_time_ms = ?, final_position = ? 
-        WHERE session_id = ? AND citizenid = ?
-    ]], {timeMs, position, sessionId, finisher.citizenid})
-    
-    MySQL.insert([[
-        INSERT INTO qbx_race_times (race_id, driver_name, citizenid, time_ms, vehicle_model) 
-        VALUES (?, ?, ?, ?, ?)
-    ]], {session.raceId, finisher.driverName, finisher.citizenid, timeMs, vehicleModel})
-    
-    -- 統計更新
+    -- 結果・記録・統計はまとめて保存し、保存が終わってからレース終了の判定（賞金の確定）に進む
+    local finishQueries = {
+        {
+            query = "UPDATE qbx_session_participants SET status = 'finished', finish_time_ms = ?, final_position = ? WHERE session_id = ? AND citizenid = ?",
+            values = {timeMs, position, sessionId, finisher.citizenid}
+        },
+        {
+            query = 'INSERT INTO qbx_race_times (race_id, driver_name, citizenid, time_ms, vehicle_model) VALUES (?, ?, ?, ?, ?)',
+            values = {session.raceId, finisher.driverName, finisher.citizenid, timeMs, vehicleModel}
+        }
+    }
     if GetConfigValue('Race.updateStats', true) then
-        MySQL.update('UPDATE qbx_driver_profiles SET total_races = total_races + 1 WHERE citizenid = ?', {finisher.citizenid})
-        if position == 1 then
-            MySQL.update('UPDATE qbx_driver_profiles SET total_wins = total_wins + 1 WHERE citizenid = ?', {finisher.citizenid})
-        end
+        finishQueries[#finishQueries + 1] = {
+            query = 'UPDATE qbx_driver_profiles SET total_races = total_races + 1, total_wins = total_wins + ? WHERE citizenid = ?',
+            values = {position == 1 and 1 or 0, finisher.citizenid}
+        }
+    end
+    if not MySQL.transaction.await(finishQueries) then
+        print(('^1[CAM Racing]^7 %s のゴール記録を保存できませんでした（session=%d）'):format(finisher.driverName, sessionId))
     end
     
     -- 完了通知（賞金はレース終了時にまとめて支払う）

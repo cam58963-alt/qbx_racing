@@ -12,6 +12,7 @@
 isRacing = false
 isMultiplayerRace = false
 local currentRace = nil
+local soloCountdownVehicle = 0  -- ソロのカウントダウン中に止めている車両（リソース停止時に解除するため）
 local raceStartTime = 0
 local currentCheckpoint = 1
 local currentLap = 1
@@ -754,6 +755,7 @@ function StartRace(race)
         
         -- カウントダウン中は車両を止める（走りながらのスタートで記録が縮まないように）
         local countdownVehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+        soloCountdownVehicle = countdownVehicle
         if countdownVehicle ~= 0 then
             FreezeEntityPosition(countdownVehicle, true)
         end
@@ -761,6 +763,7 @@ function StartRace(race)
         for i = countdownDuration, 1, -1 do
             if currentRace ~= thisRace then
                 if countdownVehicle ~= 0 then FreezeEntityPosition(countdownVehicle, false) end
+                soloCountdownVehicle = 0
                 return
             end
             lib.showTextUI(string.format([[%d]], i), {
@@ -798,6 +801,7 @@ function StartRace(race)
         if countdownVehicle ~= 0 then
             FreezeEntityPosition(countdownVehicle, false)
         end
+        soloCountdownVehicle = 0
         if currentRace ~= thisRace then
             lib.hideTextUI()
             return
@@ -1575,6 +1579,12 @@ end
 -- ===================================
 AddEventHandler('onResourceStop', function(resourceName)
     if resourceName ~= GetCurrentResourceName() then return end
+    
+    -- ソロのカウントダウン中に止めた車両を解除（カウントダウン中は isRacing が false のため個別に）
+    if soloCountdownVehicle ~= 0 and DoesEntityExist(soloCountdownVehicle) then
+        FreezeEntityPosition(soloCountdownVehicle, false)
+    end
+    soloCountdownVehicle = 0
     
     -- レース中の場合はクリーンアップ
     if isRacing then
