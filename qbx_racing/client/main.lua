@@ -1,5 +1,5 @@
 -- ===================================
--- QBX Racing System - Client Main
+-- CAM Racing System - Client Main
 -- v4.2.0
 -- ===================================
 -- UI構成:
@@ -17,6 +17,10 @@ local sessionParticipants = {}
 local isCreatingRace = false
 local raceCreationData = nil
 local isInCountdown = false
+local sessionStatus = nil      -- 'lobby' | 'countdown' | 'racing'（サーバーの sessionUpdate で更新）
+local lobbyIsHost = false
+local lobbyRace = nil
+local lobbyThreadSession = nil  -- ロビー自動更新スレッドの多重起動防止
 
 -- デバッグモード
 local DEBUG_MODE = GetConvar('qbx_racing_debug', 'false') == 'true'
@@ -46,7 +50,7 @@ end
 -- デバッグログ出力
 local function DebugLog(message)
     if DEBUG_MODE then
-        print('^3[QBX Racing Debug]^7 ' .. tostring(message))
+        print('^3[CAM Racing Debug]^7 ' .. tostring(message))
     end
 end
 
@@ -299,6 +303,7 @@ function ShowSessionCreateDialog(race)
             if result.success then
                 currentSession = result.sessionId
                 isInSession = true
+                sessionParticipants = result.participants or {}
                 
                 local message = ''
                 if result.isBetMode then
@@ -424,7 +429,6 @@ function ShowActiveSessionsList(race)
         lib.registerContext({
             id = 'qbx_racing_active_sessions',
             title = '参加可能なセッション',
-            menu = 'qbx_racing_multi_menu',
             options = options
         })
         lib.showContext('qbx_racing_active_sessions')
@@ -715,7 +719,7 @@ RegisterNUICallback('createSession', function(data, cb)
         if result and result.success then
             currentSession = result.sessionId
             isInSession = true
-            sessionParticipants = {}
+            sessionParticipants = result.participants or {}
             
             -- UIを閉じてロビー画面へ
             CloseMenuUI()
@@ -741,18 +745,20 @@ RegisterNUICallback('createSession', function(data, cb)
     end, data)
 end)
 
--- セッション参加
-RegisterNUICallback('joinSession', function(data, cb)
-    if not data or not data.sessionId then
-        cb({success = false, message = 'セッションIDが指定されていません'})
+-- セッション参加（コンテキストメニュー・NUI 共通）
+function JoinSession(sessionId, race, cb)
+    if isInSession and currentSession then
+        local result = {success = false, message = '既に別のセッションに参加しています（/racelobby でロビーを開けます）'}
+        lib.notify({title = 'エラー', description = result.message, type = 'error'})
+        if cb then cb(result) end
         return
     end
     
-    DebugLog('Joining session: ' .. data.sessionId)
+    DebugLog('Joining session: ' .. tostring(sessionId))
     
     lib.callback('qbx_racing:server:joinSession', false, function(result)
         if result and result.success then
-            currentSession = data.sessionId
+            currentSession = sessionId
             isInSession = true
             sessionParticipants = result.participants or {}
             
@@ -765,7 +771,7 @@ RegisterNUICallback('joinSession', function(data, cb)
                 type = 'success'
             })
             
-            ShowSessionLobby(data.sessionId, false, nil)
+            ShowSessionLobby(sessionId, false, race)
             DebugLog('Session joined successfully')
         else
             lib.notify({
@@ -776,8 +782,17 @@ RegisterNUICallback('joinSession', function(data, cb)
             DebugLog('Session join failed')
         end
         
-        cb(result or {success = false})
-    end, data.sessionId)
+        if cb then cb(result or {success = false}) end
+    end, sessionId)
+end
+
+RegisterNUICallback('joinSession', function(data, cb)
+    if not data or not data.sessionId then
+        cb({success = false, message = 'セッションIDが指定されていません'})
+        return
+    end
+    
+    JoinSession(data.sessionId, nil, cb)
 end)
 
 -- ===================================
@@ -952,6 +967,12 @@ end)
 -- セッションロビーUI
 -- ===================================
 function ShowSessionLobby(sessionId, isHost, race)
+    lobbyIsHost = isHost and true or false
+    lobbyRace = race or lobbyRace
+    if sessionStatus ~= 'countdown' and sessionStatus ~= 'racing' then
+        sessionStatus = 'lobby'
+    end
+    
     local function refreshLobby()
         local options = {}
         
@@ -981,6 +1002,13 @@ function ShowSessionLobby(sessionId, isHost, race)
                 onSelect = function()
                     DebugLog('Starting countdown for session: ' .. sessionId)
                     TriggerServerEvent('qbx_racing:server:startCountdown', sessionId)
+                    -- 開始できなかった場合（人数不足など）はロビーを開き直す
+                    SetTimeout(1500, function()
+                        if isInSession and currentSession == sessionId and sessionStatus == 'lobby'
+                            and not isInCountdown and not lib.getOpenContextMenu() then
+                            refreshLobby()
+                        end
+                    end)
                 end
             })
         end
@@ -993,9 +1021,7 @@ function ShowSessionLobby(sessionId, isHost, race)
             onSelect = function()
                 -- サーバーに離脱通知（返金処理もサーバー側で実行）
                 TriggerServerEvent('qbx_racing:server:leaveSession', sessionId)
-                isInSession = false
-                currentSession = nil
-                sessionParticipants = {}
+                ResetSessionState()
                 DebugLog('Left session: ' .. sessionId)
             end
         })
@@ -1010,16 +1036,44 @@ function ShowSessionLobby(sessionId, isHost, race)
     
     refreshLobby()
     
-    -- 自動更新スレッド
+    -- 自動更新スレッド（同じセッションで多重起動しない）
+    if lobbyThreadSession == sessionId then return end
+    lobbyThreadSession = sessionId
     CreateThread(function()
-        while isInSession and currentSession == sessionId do
+        while isInSession and currentSession == sessionId and sessionStatus == 'lobby' do
             Wait(1000)
             if lib.getOpenContextMenu() == 'qbx_racing_lobby' then
                 refreshLobby()
             end
         end
+        if lobbyThreadSession == sessionId then
+            lobbyThreadSession = nil
+        end
     end)
 end
+
+-- セッション状態をリセット
+function ResetSessionState()
+    isInSession = false
+    currentSession = nil
+    sessionParticipants = {}
+    sessionStatus = nil
+    lobbyIsHost = false
+    lobbyRace = nil
+end
+
+-- ロビーを閉じてしまった時に開き直す
+RegisterCommand('racelobby', function()
+    if not isInSession or not currentSession then
+        lib.notify({title = 'ロビー', description = '参加中のセッションはありません', type = 'inform'})
+        return
+    end
+    if sessionStatus ~= 'lobby' then
+        lib.notify({title = 'ロビー', description = 'レースは既に開始しています', type = 'inform'})
+        return
+    end
+    ShowSessionLobby(currentSession, lobbyIsHost, lobbyRace)
+end, false)
 
 -- ===================================
 -- チェックポイント設置モード
@@ -1330,7 +1384,12 @@ end)
 function StartCountdownRestrictions(sessionId, startPoint, duration)
     isInCountdown = true
     local endTime = GetGameTimer() + (duration * 1000)
-    local startCoords = vector3(startPoint.x, startPoint.y, startPoint.z)
+    -- 全員をスタート地点1点に戻すと車両が重なるため、カウントダウン開始時の各自の位置で固定する
+    -- （スタート地点付近にいるかはサーバーが startAreaRadius で確認済み）
+    local initialVehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    local lockCoords = initialVehicle ~= 0 and GetEntityCoords(initialVehicle)
+        or vector3(startPoint.x, startPoint.y, startPoint.z)
+    local lockHeading = initialVehicle ~= 0 and GetEntityHeading(initialVehicle) or nil
     local maxDistance = GetConfigValue('Multiplayer.countdownRestrictions.maxDistanceFromStart', 3.0)
     local showWarnings = GetConfigValue('Multiplayer.countdownRestrictions.showWarnings', true)
     local disableControls = GetConfigValue('Multiplayer.countdownRestrictions.disableControls', true)
@@ -1356,12 +1415,15 @@ function StartCountdownRestrictions(sessionId, startPoint, duration)
                     DisableControlAction(0, 75, true)  -- F（車両退出）
                 end
                 
-                -- スタート地点から離れたら戻す
+                -- 固定位置から離れたら戻す
                 local currentCoords = GetEntityCoords(vehicle)
-                local distance = #(currentCoords - startCoords)
+                local distance = #(currentCoords - lockCoords)
                 
                 if distance > maxDistance then
-                    SetEntityCoords(vehicle, startCoords.x, startCoords.y, startCoords.z, false, false, false, true)
+                    SetEntityCoords(vehicle, lockCoords.x, lockCoords.y, lockCoords.z, false, false, false, true)
+                    if lockHeading then
+                        SetEntityHeading(vehicle, lockHeading)
+                    end
                     
                     if showWarnings then
                         lib.notify({
@@ -1397,12 +1459,18 @@ end
 RegisterNetEvent('qbx_racing:client:sessionUpdate', function(data)
     if data.sessionId == currentSession then
         sessionParticipants = data.participants or {}
+        if data.status then
+            sessionStatus = data.status
+        end
         DebugLog('Session updated - participants: ' .. #sessionParticipants)
     end
 end)
 
 -- カウントダウン開始
 RegisterNetEvent('qbx_racing:client:countdownStarted', function(data)
+    if data.sessionId == currentSession then
+        sessionStatus = 'countdown'
+    end
     lib.hideContext()
     
     lib.notify({
@@ -1469,11 +1537,15 @@ RegisterNetEvent('qbx_racing:client:multiRaceStart', function(data)
     
     DebugLog('Multiplayer race started for session: ' .. data.sessionId)
     
+    -- ロビー状態を終了（以降は race_logic.lua がレースを管理）
+    isInCountdown = false
+    ResetSessionState()
+    
     -- マルチプレイヤーレース開始（race_logic.luaの関数を呼び出し）
     if StartMultiplayerRace then
         StartMultiplayerRace(data.race, data.sessionId, data.participants)
     else
-        print('^1[QBX Racing]^7 エラー: StartMultiplayerRace関数が見つかりません（race_logic.luaを確認してください）')
+        print('^1[CAM Racing]^7 エラー: StartMultiplayerRace関数が見つかりません（race_logic.luaを確認してください）')
     end
 end)
 
@@ -1485,9 +1557,8 @@ RegisterNetEvent('qbx_racing:client:sessionCancelled', function(data)
             lib.hideContext()
         end
         
-        isInSession = false
-        currentSession = nil
-        sessionParticipants = {}
+        isInCountdown = false
+        ResetSessionState()
         
         lib.notify({
             title = 'セッション終了',
@@ -1538,7 +1609,7 @@ RegisterNetEvent('qbx_racing:client:startSoloRace', function(race)
     if StartRace then
         StartRace(race)
     else
-        print('^1[QBX Racing]^7 エラー: StartRace関数が見つかりません（race_logic.luaを確認してください）')
+        print('^1[CAM Racing]^7 エラー: StartRace関数が見つかりません（race_logic.luaを確認してください）')
     end
 end)
 
@@ -1569,7 +1640,7 @@ AddEventHandler('onResourceStop', function(resourceName)
     raceCreationData = nil
     isInCountdown = false
     
-    print('^2[QBX Racing]^7 クライアントメイン停止完了')
+    print('^2[CAM Racing]^7 クライアントメイン停止完了')
 end)
 
 -- ===================================
@@ -1578,13 +1649,13 @@ end)
 CreateThread(function()
     -- Config検証
     if not Config then
-        print('^1[QBX Racing]^7 警告: Config.luaが読み込まれていません')
+        print('^1[CAM Racing]^7 警告: Config.luaが読み込まれていません')
     end
     
-    print('^2[QBX Racing]^7 クライアントメイン起動完了')
+    print('^2[CAM Racing]^7 クライアントメイン起動完了')
     
     if DEBUG_MODE then
-        print('^3[QBX Racing]^7 デバッグモードが有効です')
+        print('^3[CAM Racing]^7 デバッグモードが有効です')
     end
 end)
 

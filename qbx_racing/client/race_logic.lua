@@ -1,5 +1,5 @@
 -- ===================================
--- QBX Racing System - Client Race Logic
+-- CAM Racing System - Client Race Logic
 -- 完全統合版 v4.2.0
 -- レース進行・ゴーストモード・チェックポイント管理・視覚効果
 -- ===================================
@@ -65,7 +65,7 @@ end
 -- デバッグログ出力
 local function DebugLog(message)
     if DEBUG_MODE then
-        print('^3[QBX Racing Logic]^7 ' .. tostring(message))
+        print('^3[CAM Racing Logic]^7 ' .. tostring(message))
     end
 end
 
@@ -1535,7 +1535,7 @@ AddEventHandler('onResourceStop', function(resourceName)
     isGhostModeActive = false
     ghostedEntities = {}
     
-    print('^2[QBX Racing]^7 レースロジック停止完了')
+    print('^2[CAM Racing]^7 レースロジック停止完了')
 end)
 
 -- ===================================
@@ -1553,9 +1553,9 @@ end
 -- 初期化
 -- ===================================
 CreateThread(function()
-    print('^2[QBX Racing]^7 レースロジック起動完了')
+    print('^2[CAM Racing]^7 レースロジック起動完了')
     
     if DEBUG_MODE then
-        print('^3[QBX Racing]^7 デバッグモードが有効です（race_logic.lua）')
+        print('^3[CAM Racing]^7 デバッグモードが有効です（race_logic.lua）')
     end
 end)

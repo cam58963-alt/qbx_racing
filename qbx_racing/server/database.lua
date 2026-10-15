@@ -1,5 +1,5 @@
 -- ===================================
--- QBX Racing System - Database Helper Functions
+-- CAM Racing System - Database Helper Functions
 -- v4.2.0
 -- ※ server/main.lua でも直接クエリを実行しているため、
 --   これらは共通ユーティリティとして利用可能

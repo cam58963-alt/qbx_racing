@@ -1,5 +1,5 @@
 -- ===================================
--- QBX Racing System - Configuration
+-- CAM Racing System - Configuration
 -- 完全統合版 v4.2.0
 -- すべての設定項目を一元管理
 -- ===================================
@@ -503,7 +503,8 @@ Config.Multiplayer = {
     countdownRestrictions = {
         freezeVehicle = true,          -- 車両を完全ロック
         disableControls = true,        -- 操作を無効化
-        maxDistanceFromStart = 3.0,    -- スタート地点からの最大距離（メートル）
+        maxDistanceFromStart = 3.0,    -- カウントダウン開始位置から動ける最大距離（メートル）
+        startAreaRadius = 30.0,        -- スタート地点からこの半径内にいる人だけがレースに出られる（メートル）
         teleportBackToStart = true,    -- 範囲外に出たら戻す
         showWarnings = true            -- 警告表示
     }
@@ -588,7 +589,7 @@ Config.UI = {
             icon = 'fa-solid fa-flag-checkered',  -- Font Awesome 6 のクラス、または画像URL
             color = '#ef4444',
             category = 'ゲーム',
-            developer = 'QBX Racing',
+            developer = 'CAM Racing',
             size = 24,                 -- MB（ダウンロード演出用）
             featured = true,           -- ストアのおすすめに表示
             system = false,            -- true で全員インストール済み & 削除不可
@@ -786,27 +787,27 @@ function ValidateConfig()
     
     -- エラー表示
     if #errors > 0 then
-        print('^1[QBX Racing]^7 Config validation errors:')
+        print('^1[CAM Racing]^7 Config validation errors:')
         for _, error in ipairs(errors) do
             print('^1  - ^7' .. error)
         end
         return false
     end
     
-    print('^2[QBX Racing]^7 Config validation passed')
+    print('^2[CAM Racing]^7 Config validation passed')
     return true
 end
 
 -- 初期化メッセージ
 if IsDuplicityVersion() then
     -- サーバーサイド
-    print('^2[QBX Racing]^7 Config loaded successfully')
-    print('^2[QBX Racing]^7 Version: ' .. Config.Version.major .. '.' .. Config.Version.minor .. '.' .. Config.Version.patch)
-    print('^2[QBX Racing]^7 Multiplayer: ' .. (Config.Multiplayer.enabled and 'Enabled' or 'Disabled'))
-    print('^2[QBX Racing]^7 Ghost Mode: ' .. (Config.Multiplayer.ghostMode.enabled and 'Enabled' or 'Disabled'))
+    print('^2[CAM Racing]^7 Config loaded successfully')
+    print('^2[CAM Racing]^7 Version: ' .. Config.Version.major .. '.' .. Config.Version.minor .. '.' .. Config.Version.patch)
+    print('^2[CAM Racing]^7 Multiplayer: ' .. (Config.Multiplayer.enabled and 'Enabled' or 'Disabled'))
+    print('^2[CAM Racing]^7 Ghost Mode: ' .. (Config.Multiplayer.ghostMode.enabled and 'Enabled' or 'Disabled'))
 else
     -- クライアントサイド
-    print('^2[QBX Racing]^7 Client config loaded')
+    print('^2[CAM Racing]^7 Client config loaded')
 end
 
 -- 開発モードの場合は検証実行
