@@ -1630,7 +1630,8 @@ AddEventHandler('playerDropped', function(reason)
         for i, participant in ipairs(session.participants) do
             if participant.source == src then
                 -- ロビー中の参加費返金は不要（切断なので送金先がない）
-                if session.status == 'racing' and participant.status == 'racing' then
+                if (session.status == 'racing' or session.status == 'countdown')
+                    and participant.status ~= 'finished' and participant.status ~= 'excluded' and participant.status ~= 'retired' then
                     SetParticipantStatus(sessionId, participant, 'retired')
                 end
                 table.remove(session.participants, i)
