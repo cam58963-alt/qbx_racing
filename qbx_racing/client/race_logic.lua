@@ -21,6 +21,7 @@ local raceCheckpoints = {}
 local multiplayerSessionId = nil
 local ghostPlayers = {}
 local progressData = {}
+local finishedCount = 0  -- 先にゴールした人数（サーバーから届く）
 
 -- ゴーストモード管理
 local isGhostModeActive = false
@@ -53,13 +54,30 @@ local function GetConfigValue(path, defaultValue)
     
     local current = Config
     for _, key in ipairs(keys) do
-        if current and current[key] then
+        -- false も設定値として扱う（nil のときだけ既定値）
+        if type(current) == 'table' and current[key] ~= nil then
             current = current[key]
         else
             return defaultValue
         end
     end
     return current
+end
+
+-- 前回位置から今回位置までの間にチェックポイントの球を通ったか（高速でもすり抜けない）
+local function PassedThrough(fromPos, toPos, center, radius)
+    if #(toPos - center) <= radius then return true end
+    if not fromPos then return false end
+    
+    local segment = toPos - fromPos
+    local lengthSq = segment.x * segment.x + segment.y * segment.y + segment.z * segment.z
+    -- 止まっている時・テレポートのような大きな移動は線分で判定しない
+    if lengthSq < 0.0001 or lengthSq > 200.0 * 200.0 then return false end
+    
+    local toCenter = center - fromPos
+    local t = (toCenter.x * segment.x + toCenter.y * segment.y + toCenter.z * segment.z) / lengthSq
+    t = math.max(0.0, math.min(1.0, t))
+    return #((fromPos + segment * t) - center) <= radius
 end
 
 -- デバッグログ出力
@@ -410,13 +428,8 @@ function CleanupDistantGhosts(playerCoords)
             
             -- 範囲外または古いエンティティをリセット
             if distance > maxDistance or (currentTime - data.lastUpdate) > 5000 then
+                -- 衝突は毎フレームの無効化を止めれば戻る（false で呼ぶと逆に永久に無効になる）
                 ResetEntityAlpha(entity)
-                
-                local playerVehicle = GetVehiclePedIsIn(PlayerPedId(), false)
-                if playerVehicle ~= 0 then
-                    SetEntityNoCollisionEntity(playerVehicle, entity, false)
-                    SetEntityNoCollisionEntity(entity, playerVehicle, false)
-                end
                 
                 ghostedEntities[entity] = nil
             end
@@ -512,13 +525,8 @@ function ResetGhostMode()
     local vehicles = GetGamePool('CVehicle')
     for _, vehicle in ipairs(vehicles) do
         if DoesEntityExist(vehicle) then
+            -- 衝突は毎フレームの無効化を止めれば戻る（false で呼ぶと逆に永久に無効になる）
             ResetEntityAlpha(vehicle)
-            
-            local playerVehicle = GetVehiclePedIsIn(PlayerPedId(), false)
-            if playerVehicle ~= 0 and vehicle ~= playerVehicle then
-                SetEntityNoCollisionEntity(playerVehicle, vehicle, false)
-                SetEntityNoCollisionEntity(vehicle, playerVehicle, false)
-            end
         end
     end
     
@@ -584,12 +592,6 @@ function ResetGhostModeOptimized()
     for entity, data in pairs(ghostedEntities) do
         if DoesEntityExist(entity) then
             ResetEntityAlpha(entity)
-            
-            local playerVehicle = GetVehiclePedIsIn(PlayerPedId(), false)
-            if playerVehicle ~= 0 then
-                SetEntityNoCollisionEntity(playerVehicle, entity, false)
-                SetEntityNoCollisionEntity(entity, playerVehicle, false)
-            end
         end
     end
     
@@ -604,10 +606,10 @@ end
 
 -- ソロレース開始
 function StartRace(race)
-    if isRacing then
+    if isRacing or currentRace then
         lib.notify({
             title = 'エラー',
-            description = '既にレース中です',
+            description = '既にレース中（またはスタート地点へ移動中）です',
             type = 'error'
         })
         return
@@ -688,6 +690,7 @@ function StartRace(race)
     local countdownDuration = GetConfigValue('Race.countdownSeconds', 5)
     local startRadius = GetConfigValue('Checkpoint.radius', 10.0) * 2 -- スタート判定は広めに
     
+    local thisRace = race
     CreateThread(function()
         -- スタート地点への接近を待つ（案内表示更新付き）
         if startCp then
@@ -731,10 +734,8 @@ function StartRace(race)
                 
                 Wait(1000)
                 
-                -- レース開始前にキャンセルされた場合
-                if not currentRace then
-                    lib.hideTextUI()
-                    ClearRaceBlips()
+                -- レース開始前に取り消された場合（後片付けは取り消した側で済んでいる）
+                if currentRace ~= thisRace then
                     return
                 end
             end
@@ -751,7 +752,17 @@ function StartRace(race)
             duration = 2000
         })
         
+        -- カウントダウン中は車両を止める（走りながらのスタートで記録が縮まないように）
+        local countdownVehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+        if countdownVehicle ~= 0 then
+            FreezeEntityPosition(countdownVehicle, true)
+        end
+        
         for i = countdownDuration, 1, -1 do
+            if currentRace ~= thisRace then
+                if countdownVehicle ~= 0 then FreezeEntityPosition(countdownVehicle, false) end
+                return
+            end
             lib.showTextUI(string.format([[%d]], i), {
                 position = "top-center",
                 icon = 'stopwatch',
@@ -784,8 +795,17 @@ function StartRace(race)
         })
         PlaySoundFrontend(-1, 'GO', 'HUD_MINI_GAME_SOUNDSET', true)
         
+        if countdownVehicle ~= 0 then
+            FreezeEntityPosition(countdownVehicle, false)
+        end
+        if currentRace ~= thisRace then
+            lib.hideTextUI()
+            return
+        end
+        
         isRacing = true
         raceStartTime = GetGameTimer()
+        TriggerServerEvent('qbx_racing:server:soloRaceStarted', thisRace.id)
         
         -- ソロ用ゴーストモード開始（NPC衝突回避）
         StartSoloGhostMode()
@@ -810,16 +830,18 @@ function SoloRaceProgressThread()
     
     DebugLog('Solo race progress started - Type: ' .. (isSprintRace and 'sprint' or 'circuit') .. ', Laps: ' .. totalLaps)
     
+    local lastCoords = nil
     while isRacing and currentRace do
         local ped = PlayerPedId()
         local coords = GetEntityCoords(ped)
+        local fromCoords = lastCoords
+        lastCoords = coords
         
         if currentCheckpoint <= #raceCheckpoints then
             local cp = raceCheckpoints[currentCheckpoint]
             local cpCoords = vector3(cp.x, cp.y, cp.z)
-            local distance = #(coords - cpCoords)
             
-            if distance <= (cp.radius or 10.0) then
+            if PassedThrough(fromCoords, coords, cpCoords, cp.radius or 10.0) then
                 currentCheckpoint = currentCheckpoint + 1
                 
                 -- ブリップ更新
@@ -870,7 +892,7 @@ function SoloRaceProgressThread()
             end
         end
         
-        Wait(100)
+        Wait(0) -- 毎フレーム判定（タイムの精度と、高速時のすり抜け防止）
     end
 end
 
@@ -949,6 +971,27 @@ end
 
 -- ソロレースリタイア
 function RetireSoloRace()
+    -- スタート地点へ移動中・カウントダウン中の取り消し（進行スレッドは currentRace の変化を見て止まる）
+    if not isRacing and currentRace and not isMultiplayerRace then
+        currentRace = nil
+        currentCheckpoint = 1
+        currentLap = 1
+        raceCheckpoints = {}
+        ClearRaceBlips()
+        ClearCheckpointEntities()
+        SetWaypointOff()
+        lib.hideTextUI()
+        local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+        if vehicle ~= 0 then FreezeEntityPosition(vehicle, false) end
+        
+        lib.notify({
+            title = 'レース取り消し',
+            description = 'スタート前のレースを取り消しました',
+            type = 'inform'
+        })
+        return
+    end
+    
     if not isRacing then return end
     
     DebugLog('Solo race retired')
@@ -983,20 +1026,30 @@ function RetireSoloRace()
 end
 
 -- マルチプレイヤーレースリタイア
-function RetireMultiplayerRace()
+-- timeUp = true のときはサーバーが制限時間切れでリタイア扱いにした（サーバーへの通知は不要）
+function RetireMultiplayerRace(timeUp)
     if not isRacing or not isMultiplayerRace then return end
     
     DebugLog('Multiplayer race retired - Session: ' .. tostring(multiplayerSessionId))
     
-    -- サーバーにリタイア通知
-    TriggerServerEvent('qbx_racing:server:retireRace', multiplayerSessionId)
-    
-    lib.notify({
-        title = 'リタイア',
-        description = 'レースを放棄しました',
-        type = 'error',
-        duration = 5000
-    })
+    if timeUp then
+        lib.notify({
+            title = 'タイムアップ',
+            description = '制限時間を過ぎたため、レースを終了しました',
+            type = 'error',
+            duration = 8000
+        })
+    else
+        -- サーバーにリタイア通知
+        TriggerServerEvent('qbx_racing:server:retireRace', multiplayerSessionId)
+        
+        lib.notify({
+            title = 'リタイア',
+            description = 'レースを放棄しました',
+            type = 'error',
+            duration = 5000
+        })
+    end
     
     -- NUI HUD非表示
     SendNUIMessage({ action = 'updateRaceHUD', visible = false })
@@ -1037,15 +1090,23 @@ function StartMultiplayerRace(race, sessionId, participants)
     if isRacing then
         lib.notify({
             title = 'エラー',
-            description = '既にレース中です',
+            description = '既にレース中のため、マルチプレイレースには参加できませんでした',
             type = 'error'
         })
+        TriggerServerEvent('qbx_racing:server:retireRace', sessionId)
         return
+    end
+    
+    -- スタート地点へ移動中のソロレースは取り消す
+    if currentRace then
+        RetireSoloRace()
     end
     
     isMultiplayerRace = true
     multiplayerSessionId = sessionId
     ghostPlayers = participants or {}
+    progressData = {}
+    finishedCount = 0
     
     currentRace = race
     raceCheckpoints = race.checkpoints or {}
@@ -1089,16 +1150,18 @@ end
 function MultiplayerRaceProgressThread(isSprintRace, totalLaps)
     DebugLog('Multiplayer race progress started - Type: ' .. (isSprintRace and 'sprint' or 'circuit') .. ', Laps: ' .. totalLaps)
     
+    local lastCoords = nil
     while isRacing and currentRace do
         local ped = PlayerPedId()
         local coords = GetEntityCoords(ped)
+        local fromCoords = lastCoords
+        lastCoords = coords
         
         if currentCheckpoint <= #raceCheckpoints then
             local cp = raceCheckpoints[currentCheckpoint]
             local cpCoords = vector3(cp.x, cp.y, cp.z)
-            local distance = #(coords - cpCoords)
             
-            if distance <= (cp.radius or 10.0) then
+            if PassedThrough(fromCoords, coords, cpCoords, cp.radius or 10.0) then
                 currentCheckpoint = currentCheckpoint + 1
                 
                 -- サーバーに進捗報告
@@ -1153,7 +1216,7 @@ function MultiplayerRaceProgressThread(isSprintRace, totalLaps)
             end
         end
         
-        Wait(100)
+        Wait(0) -- 毎フレーム判定（タイムの精度と、高速時のすり抜け防止）
     end
 end
 
@@ -1196,7 +1259,7 @@ end
 -- 順位計算
 function CalculateMyPosition()
     local myProgress = (currentLap - 1) * #raceCheckpoints + (currentCheckpoint - 1)
-    local position = 1
+    local position = 1 + finishedCount  -- 先にゴールした人より後ろ
     
     for _, data in pairs(progressData) do
         if data.status == 'racing' then
@@ -1212,7 +1275,16 @@ end
 
 -- 進捗更新受信
 RegisterNetEvent('qbx_racing:client:progressUpdate', function(data)
+    if data.sessionId ~= multiplayerSessionId then return end
     progressData = data.progressData or {}
+    finishedCount = data.finishedCount or 0
+end)
+
+-- 制限時間切れ
+RegisterNetEvent('qbx_racing:client:raceTimeUp', function(data)
+    if data.sessionId == multiplayerSessionId then
+        RetireMultiplayerRace(true)
+    end
 end)
 
 -- マルチプレイヤーレース完了
@@ -1547,6 +1619,11 @@ end
 
 function IsCurrentlyMultiplayer()
     return isMultiplayerRace
+end
+
+-- レース中、またはスタート地点へ移動中・カウントダウン中
+function IsRaceBusy()
+    return isRacing or currentRace ~= nil
 end
 
 -- ===================================
