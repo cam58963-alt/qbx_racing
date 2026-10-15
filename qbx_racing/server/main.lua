@@ -1022,6 +1022,22 @@ function RemoveLobbyParticipant(sessionId, index)
     if not recorded then
         print(('^1[CAM Racing]^7 セッション %d: %s の退出を保存できませんでした'):format(sessionId, participant.driverName))
         participant.removing = nil
+
+        -- 待っている間にセッションが中止・終了していた場合、中止処理はこの人を返金対象から外しているので、
+        -- この人の返金だけをもう一度記録する（記録できればそのまま精算）
+        if refund and ActiveSessions[sessionId] ~= session then
+            if RecordPayouts(sessionId,
+                {{citizenid = participant.citizenid, amount = session.entryFee, reason = 'race-entry-refund'}},
+                {{query = 'UPDATE qbx_session_participants SET entry_paid = 0 WHERE session_id = ? AND citizenid = ?',
+                  values = {sessionId, participant.citizenid}}}) then
+                SettlePayouts(sessionId, {[participant.citizenid] = OnlineSource(participant)})
+            else
+                print(('^1[CAM Racing]^7 セッション %d: %s の参加費の返金を記録できませんでした（要手動対応）'):format(
+                    sessionId, participant.driverName))
+            end
+            return true
+        end
+
         if refund then
             participant.entryPaid = true
             session.prizePool = session.prizePool + session.entryFee
@@ -1513,7 +1529,14 @@ RegisterNetEvent('qbx_racing:server:finishMultiRace', function(sessionId, timeMs
         }
     end
     if not MySQL.transaction.await(finishQueries) then
-        print(('^1[CAM Racing]^7 %s のゴール記録を保存できませんでした（session=%d）'):format(finisher.driverName, sessionId))
+        -- 保存できなかった記録は、レース終了時の精算（賞金の記録と同じトランザクション）でもう一度保存する
+        -- （そこでも保存できなければ賞金も確定しない）
+        print(('^1[CAM Racing]^7 %s のゴール記録を保存できませんでした（session=%d、終了時に再保存します）'):format(
+            finisher.driverName, sessionId))
+        session.pendingFinishQueries = session.pendingFinishQueries or {}
+        for _, query in ipairs(finishQueries) do
+            table.insert(session.pendingFinishQueries, query)
+        end
     end
     
     -- 完了通知（賞金はレース終了時にまとめて支払う）
@@ -1567,6 +1590,10 @@ function CheckSessionComplete(sessionId)
     -- （記録できなかった場合は DB 上はまだ進行中なので、次回起動時に参加費を返金する）
     local payouts, extraQueries = CalculatePrizes(session)
     table.insert(extraQueries, 1, {query = 'UPDATE qbx_race_sessions SET status = ? WHERE id = ?', values = {'finished', sessionId}})
+    -- ゴール時に保存できなかった記録も一緒に保存する（記録なしで賞金だけ確定しないように）
+    for _, query in ipairs(session.pendingFinishQueries or {}) do
+        table.insert(extraQueries, query)
+    end
     if RecordPayouts(sessionId, payouts, extraQueries) then
         SettlePayouts(sessionId, SessionSources(session))
         PayHouseCut(session)
