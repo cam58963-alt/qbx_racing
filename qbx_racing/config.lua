@@ -464,6 +464,10 @@ Config.Multiplayer = {
     -- 進捗同期
     progressSyncInterval = 500,  -- 進捗同期間隔（ミリ秒）
     
+    -- 制限時間（走り続けている人がいてもレースを終わらせる）
+    maxRaceDuration = 1800,      -- レース全体の制限時間（秒）
+    finishTimeout = 180,         -- 1位がゴールしてから、残りの人がゴールできる時間（秒）
+    
     -- ===================================
     -- ゴーストモード設定（最重要）
     -- ===================================
@@ -608,7 +612,7 @@ Config.UI = {
         placeCheckpoint = 38,      -- E
         finishCreation = 45,       -- R
         cancelCreation = 200,      -- ESC
-        deleteLastCheckpoint = 177, -- Backspace
+        deleteLastCheckpoint = 194, -- Backspace（177 は右クリックでも反応するため使わない）
         placeTurnLeft = 174,       -- ← 左曲がりガイド設置
         placeTurnRight = 175,      -- → 右曲がりガイド設置
         deleteLastTurnGuide = 178, -- Delete 最後のガイド削除

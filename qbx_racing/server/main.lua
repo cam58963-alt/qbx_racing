@@ -56,6 +56,84 @@ local function GetPlayer(source)
     return success2 and corePlayer or nil
 end
 
+-- 整数に変換（数値でない・小数・NaN は nil）
+local function ToInteger(value)
+    local n = tonumber(value)
+    if not n or n ~= n or n == math.huge or n == -math.huge then return nil end
+    return math.tointeger(n)
+end
+
+-- お金を渡す（返金・賞金）
+-- 本人がオンラインならその人に、オフラインなら qbx_core に citizenid で渡す（qbx_core がオフライン保存に対応）
+local function GiveMoney(src, citizenid, amount, reason)
+    amount = ToInteger(amount)
+    if not amount or amount <= 0 then return true end
+    local currency = GetConfigValue('Race.currency', 'cash')
+    
+    local Player = src and GetPlayer(src)
+    if Player and (not citizenid or Player.PlayerData.citizenid == citizenid) then
+        Player.Functions.AddMoney(currency, amount, reason)
+        return true
+    end
+    
+    if citizenid then
+        local ok, result = pcall(function()
+            return exports.qbx_core:AddMoney(citizenid, currency, amount, reason)
+        end)
+        if ok and result then return true end
+    end
+    
+    print(('^1[CAM Racing]^7 お金を渡せませんでした: citizenid=%s 金額=$%s（%s）'):format(
+        tostring(citizenid), FormatMoney(amount), tostring(reason)))
+    return false
+end
+
+-- 同じプレイヤーのセッション作成・参加が同時に走らないようにする（DB 待ちの間の二重課金防止）
+local busyPlayers = {}
+local function RunExclusive(src, fn)
+    if busyPlayers[src] then
+        return {success = false, message = '処理中です。少し待ってからもう一度お試しください'}
+    end
+    busyPlayers[src] = true
+    local ok, result = pcall(fn)
+    busyPlayers[src] = nil
+    if not ok then
+        print('^1[CAM Racing]^7 エラー: ' .. tostring(result))
+        return {success = false, message = 'エラーが発生しました'}
+    end
+    return result
+end
+
+-- ソロレースの開始記録（サーバー側でタイムを確認するため）
+local soloRuns = {}
+
+-- コースを最高速度で走っても必要な最短時間（これより速いゴールは不正とみなす）
+local function CalculateMinRaceTimeMs(race)
+    if not GetConfigValue('Security.antiCheat.enabled', true) then return 0 end
+    
+    local checkpoints = race.checkpoints or {}
+    local laps = race.race_type == 'sprint' and 1 or math.max(1, ToInteger(race.laps) or 1)
+    local function dist(a, b)
+        return #(vector3(a.x, a.y, a.z) - vector3(b.x, b.y, b.z))
+    end
+    
+    local lapDistance = 0
+    for i = 2, #checkpoints do
+        lapDistance = lapDistance + dist(checkpoints[i - 1], checkpoints[i])
+    end
+    local closing = (race.race_type ~= 'sprint' and #checkpoints > 1) and dist(checkpoints[#checkpoints], checkpoints[1]) or 0
+    local total = lapDistance * laps + closing * (laps - 1)
+    
+    -- チェックポイントの判定半径ぶんの近道を差し引く
+    for _, cp in ipairs(checkpoints) do
+        total = total - 2 * (tonumber(cp.radius) or 10.0) * laps
+    end
+    
+    local maxSpeed = GetConfigValue('Security.antiCheat.maxSpeed', 500.0) / 3.6 -- km/h → m/s
+    if total <= 0 or maxSpeed <= 0 then return 0 end
+    return math.floor(total / maxSpeed * 1000)
+end
+
 -- 曲がり角ガイド取得（手動設置分）
 local function GetRaceTurnGuides(raceId)
     return MySQL.query.await([[
@@ -221,7 +299,7 @@ lib.callback.register('qbx_racing:server:updateDriverName', function(source, dat
         WHERE citizenid = ?
     ]], {driverName, Player.PlayerData.citizenid})
     
-    if success then
+    if success and success > 0 then
         TriggerClientEvent('ox_lib:notify', source, {
             title = '更新完了',
             description = 'ドライバーネームを「' .. driverName .. '」に変更しました',
@@ -308,15 +386,49 @@ RegisterNetEvent('qbx_racing:server:createRace', function(data)
         return
     end
     
-    if not data or not data.name or not data.checkpoints or 
-       #data.checkpoints < (Config.Checkpoint and Config.Checkpoint.minCheckpoints or 3) then
+    -- 入力チェック（クライアントから来た値はそのまま信用しない）
+    data = type(data) == 'table' and data or {}
+    local minCheckpoints = GetConfigValue('Checkpoint.minCheckpoints', 3)
+    local maxCheckpoints = GetConfigValue('Checkpoint.maxCheckpoints', 50)
+    
+    local name = type(data.name) == 'string' and data.name:gsub('^%s+', ''):gsub('%s+$', '') or ''
+    local nameLength = utf8.len(name) or #name
+    local description = type(data.description) == 'string' and data.description:sub(1, 500) or ''
+    
+    local vehicleType = data.vehicleType or 'car'
+    if not (Config.VehicleTypes and Config.VehicleTypes[vehicleType]) then vehicleType = nil end
+    local raceType = data.raceType or 'circuit'
+    if raceType ~= 'circuit' and raceType ~= 'sprint' then raceType = nil end
+    local maxLaps = GetConfigValue('RaceTypes.circuit.maxLaps', 10)
+    local laps = raceType == 'sprint' and 1 or math.max(1, math.min(maxLaps, ToInteger(data.laps) or 1))
+    
+    local checkpoints = {}
+    local checkpointsValid = type(data.checkpoints) == 'table'
+    for _, cp in ipairs(checkpointsValid and data.checkpoints or {}) do
+        local x = type(cp) == 'table' and tonumber(cp.x)
+        local y = type(cp) == 'table' and tonumber(cp.y)
+        local z = type(cp) == 'table' and tonumber(cp.z)
+        if not (x and y and z) then
+            checkpointsValid = false
+            break
+        end
+        table.insert(checkpoints, {x = x, y = y, z = z})
+    end
+    
+    if not checkpointsValid or not vehicleType or not raceType or nameLength < 1 or nameLength > 100
+        or #checkpoints < minCheckpoints or #checkpoints > maxCheckpoints then
         TriggerClientEvent('ox_lib:notify', src, {
             title = 'エラー',
-            description = 'レース名またはチェックポイントが不足しています',
+            description = string.format('レース名（1〜100文字）とチェックポイント（%d〜%d個）を確認してください',
+                minCheckpoints, maxCheckpoints),
             type = 'error'
         })
         return
     end
+    
+    -- 判定半径は車両タイプごとの設定に揃える（表示のリングと判定を一致させる）
+    local radius = GetConfigValue('VehicleTypes.' .. vehicleType .. '.checkpoint.radius',
+        GetConfigValue('Checkpoint.radius', 10.0))
     
     local profile = GetDriverProfile(Player.PlayerData.citizenid)
     if not profile then
@@ -334,28 +446,26 @@ RegisterNetEvent('qbx_racing:server:createRace', function(data)
         (name, description, vehicle_type, race_type, laps, creator_driver_name) 
         VALUES (?, ?, ?, ?, ?, ?)
     ]], {
-        data.name,
-        data.description or '',
-        data.vehicleType or 'car',
-        data.raceType or 'circuit',
-        data.laps or 1,
+        name,
+        description,
+        vehicleType,
+        raceType,
+        laps,
         profile.driver_name
     })
     
     if raceId then
-        -- チェックポイント保存
-        for i, checkpoint in ipairs(data.checkpoints) do
-            MySQL.insert.await([[
-                INSERT INTO qbx_race_checkpoints (race_id, checkpoint_order, x, y, z, radius) 
-                VALUES (?, ?, ?, ?, ?, ?)
-            ]], {
-                raceId, i, checkpoint.x, checkpoint.y, checkpoint.z, 
-                checkpoint.radius or (Config.Checkpoint and Config.Checkpoint.radius or 10.0)
-            })
+        -- チェックポイントとガイドはまとめて保存（途中で失敗したら全部取り消す）
+        local queries = {}
+        for i, checkpoint in ipairs(checkpoints) do
+            queries[#queries + 1] = {
+                query = 'INSERT INTO qbx_race_checkpoints (race_id, checkpoint_order, x, y, z, radius) VALUES (?, ?, ?, ?, ?, ?)',
+                values = {raceId, i, checkpoint.x, checkpoint.y, checkpoint.z, radius}
+            }
         end
         
         -- 曲がり角ガイド保存（手動設置分、checkpoint は一番近いチェックポイント）
-        local checkpointCount = #data.checkpoints
+        local checkpointCount = #checkpoints
         local maxTurnGuides = Config.Checkpoint and Config.Checkpoint.maxTurnGuides or 50
         local savedGuides = 0
         for _, guide in ipairs(type(data.turnGuides) == 'table' and data.turnGuides or {}) do
@@ -375,19 +485,29 @@ RegisterNetEvent('qbx_racing:server:createRace', function(data)
             segments = math.max(1, math.min(maxSegments, segments))
             
             if isValid and savedGuides < maxTurnGuides then
-                MySQL.insert.await([[
-                    INSERT INTO qbx_race_turn_guides (race_id, checkpoint_order, x, y, z, direction, segments) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                ]], {raceId, order, x, y, z, guide.direction, segments})
+                queries[#queries + 1] = {
+                    query = 'INSERT INTO qbx_race_turn_guides (race_id, checkpoint_order, x, y, z, direction, segments) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    values = {raceId, order, x, y, z, guide.direction, segments}
+                }
                 savedGuides = savedGuides + 1
             end
             
             ::continue::
         end
         
+        if not MySQL.transaction.await(queries) then
+            MySQL.query.await('DELETE FROM qbx_races WHERE id = ?', {raceId})
+            TriggerClientEvent('ox_lib:notify', src, {
+                title = 'エラー',
+                description = 'チェックポイントの保存に失敗しました',
+                type = 'error'
+            })
+            return
+        end
+        
         TriggerClientEvent('ox_lib:notify', src, {
             title = '成功',
-            description = 'レース「' .. data.name .. '」を作成しました',
+            description = 'レース「' .. name .. '」を作成しました',
             type = 'success'
         })
         TriggerClientEvent('qbx_racing:client:refreshRaces', -1)
@@ -412,7 +532,8 @@ function FindPlayerActiveSession(src)
     for sessionId, session in pairs(ActiveSessions) do
         if session.status == 'lobby' or session.status == 'countdown' or session.status == 'racing' then
             for _, participant in ipairs(session.participants) do
-                if participant.source == src and participant.status ~= 'excluded' and participant.status ~= 'retired'
+                if participant.source == src and not participant.disconnected
+                    and participant.status ~= 'excluded' and participant.status ~= 'retired'
                     and participant.status ~= 'finished' then
                     return sessionId
                 end
@@ -422,7 +543,30 @@ function FindPlayerActiveSession(src)
     return nil
 end
 
-lib.callback.register('qbx_racing:server:createMultiSession', function(source, data)
+-- 切断していない参加者を source で探す
+local function FindParticipant(session, src)
+    for index, participant in ipairs(session.participants) do
+        if participant.source == src and not participant.disconnected then
+            return participant, index
+        end
+    end
+    return nil
+end
+
+-- 通知などを送れる source（切断済みなら nil）
+local function OnlineSource(participant)
+    return not participant.disconnected and participant.source or nil
+end
+
+-- 主催者の source（切断済みなら nil）
+local function HostSource(session)
+    for _, participant in ipairs(session.participants) do
+        if participant.isHost then return OnlineSource(participant) end
+    end
+    return session.host
+end
+
+local function CreateMultiSession(source, data)
     local Player = GetPlayer(source)
     if not Player then 
         return {success = false, message = 'プレイヤーデータが見つかりません'} 
@@ -438,7 +582,8 @@ lib.callback.register('qbx_racing:server:createMultiSession', function(source, d
     end
     
     -- レース情報取得
-    local race = MySQL.single.await('SELECT * FROM qbx_races WHERE id = ? AND is_active = 1', {data.raceId})
+    local raceId = ToInteger(data.raceId)
+    local race = raceId and MySQL.single.await('SELECT * FROM qbx_races WHERE id = ? AND is_active = 1', {raceId})
     if not race then 
         return {success = false, message = 'レースが見つかりません'} 
     end
@@ -446,11 +591,19 @@ lib.callback.register('qbx_racing:server:createMultiSession', function(source, d
     race.checkpoints = MySQL.query.await([[
         SELECT x, y, z, radius FROM qbx_race_checkpoints 
         WHERE race_id = ? ORDER BY checkpoint_order ASC
-    ]], {data.raceId}) or {}
-    race.turnGuides = GetRaceTurnGuides(data.raceId)
+    ]], {raceId}) or {}
+    race.turnGuides = GetRaceTurnGuides(raceId)
+    if #race.checkpoints == 0 then
+        return {success = false, message = 'このレースにはチェックポイントがありません'}
+    end
+    
+    -- カウントダウン時間は設定の範囲内に収める
+    local countdownDuration = ToInteger(data.countdownDuration) or GetConfigValue('Multiplayer.defaultCountdown', 10)
+    countdownDuration = math.max(GetConfigValue('Multiplayer.minCountdown', 5),
+        math.min(GetConfigValue('Multiplayer.maxCountdown', 30), countdownDuration))
     
     -- 掛け金・スポンサー設定
-    local isBetMode = data.betMode or false
+    local isBetMode = data.betMode == true
     local entryFee = 0
     local sponsorAmount = 0
     
@@ -463,19 +616,27 @@ lib.callback.register('qbx_racing:server:createMultiSession', function(source, d
         if not GetConfigValue('Race.betting.enabled', true) then
             return {success = false, message = '掛けレース機能は無効になっています'}
         end
-        entryFee = tonumber(data.entryFee) or 0
+        
+        -- 参加費（整数・設定の範囲内）
+        local minFee = GetConfigValue('Race.betting.entryFee.min', 0)
+        local maxFee = GetConfigValue('Race.betting.entryFee.max', 100000)
+        entryFee = ToInteger(data.entryFee)
+        if not entryFee or entryFee < minFee or entryFee > maxFee then
+            return {success = false, message = string.format('参加費は$%s～$%sの整数で設定してください',
+                FormatMoney(minFee), FormatMoney(maxFee))}
+        end
         
         -- スポンサー金設定
         if GetConfigValue('Race.betting.sponsor.enabled', true) and 
            GetConfigValue('Race.betting.sponsor.host.enabled', true) then
-            sponsorAmount = tonumber(data.sponsorAmount) or 0
+            sponsorAmount = ToInteger(data.sponsorAmount or 0)
             
             -- スポンサー金額の検証
             local minSponsor = GetConfigValue('Race.betting.sponsor.host.min', 0)
             local maxSponsor = GetConfigValue('Race.betting.sponsor.host.max', 5000000)
             
-            if sponsorAmount < minSponsor or sponsorAmount > maxSponsor then
-                return {success = false, message = string.format('スポンサー金は$%s～$%sの範囲で設定してください', 
+            if not sponsorAmount or sponsorAmount < minSponsor or sponsorAmount > maxSponsor then
+                return {success = false, message = string.format('スポンサー金は$%s～$%sの整数で設定してください', 
                     FormatMoney(minSponsor), FormatMoney(maxSponsor))}
             end
             
@@ -494,7 +655,7 @@ lib.callback.register('qbx_racing:server:createMultiSession', function(source, d
             end
         end
         
-        -- 主催者の資金チェック（参加費 + スポンサー金）
+        -- 主催者の資金チェック（参加費 + スポンサー金。主催者も参加費を払う）
         local totalRequired = entryFee + sponsorAmount
         if totalRequired > 0 then
             local currency = GetConfigValue('Race.currency', 'cash')
@@ -513,11 +674,11 @@ lib.callback.register('qbx_racing:server:createMultiSession', function(source, d
          is_bet_mode, entry_fee, prize_pool, sponsor_amount, sponsor_citizenid, sponsor_name) 
         VALUES (?, ?, ?, ?, ?, 'lobby', ?, ?, ?, ?, ?, ?)
     ]], {
-        data.raceId, 
+        raceId, 
         Player.PlayerData.citizenid, 
         profile.driver_name, 
-        data.sessionName or (race.name .. ' - セッション'),
-        data.countdownDuration or GetConfigValue('Multiplayer.defaultCountdown', 10),
+        type(data.sessionName) == 'string' and data.sessionName:sub(1, 100) or (race.name .. ' - セッション'),
+        countdownDuration,
         isBetMode and 1 or 0,
         entryFee,
         sponsorAmount,  -- 初期賞金プール = スポンサー金
@@ -525,98 +686,112 @@ lib.callback.register('qbx_racing:server:createMultiSession', function(source, d
         sponsorAmount > 0 and Player.PlayerData.citizenid or nil,
         sponsorAmount > 0 and profile.driver_name or nil
     })
-    
-    if sessionId then
-        -- スポンサー金の徴収
-        if sponsorAmount > 0 then
-            local currency = GetConfigValue('Race.currency', 'cash')
-            if Player.Functions.RemoveMoney(currency, sponsorAmount, 'race-sponsor') then
-                -- スポンサー履歴に記録
-                MySQL.insert.await([[
-                    INSERT INTO qbx_race_sponsors (session_id, sponsor_citizenid, sponsor_driver_name, amount, sponsor_type) 
-                    VALUES (?, ?, ?, ?, 'host')
-                ]], {sessionId, Player.PlayerData.citizenid, profile.driver_name, sponsorAmount})
-                
-                -- 成功ログ
-                print(string.format('[CAM Racing] スポンサー記録: %s が $%d をセッション %d に提供', 
-                    profile.driver_name, sponsorAmount, sessionId))
-            else
-                -- 支払い失敗時はセッション削除
-                MySQL.query.await('DELETE FROM qbx_race_sessions WHERE id = ?', {sessionId})
-                return {success = false, message = 'スポンサー金の支払いに失敗しました'}
-            end
-        end
-        
-        -- アクティブセッション登録
-        ActiveSessions[sessionId] = {
-            id = sessionId,
-            raceId = data.raceId,
-            race = race,
-            host = source,
-            hostName = profile.driver_name,
-            participants = {},
-            status = 'lobby',
-            countdownDuration = data.countdownDuration or 10,
-            startPoint = race.checkpoints[1],
-            createdAt = os.time(),
-            
-            -- 掛け金・スポンサー情報
-            isBetMode = isBetMode,
-            entryFee = entryFee,
-            prizePool = sponsorAmount,  -- 初期プール = スポンサー金のみ
-            sponsorAmount = sponsorAmount,
-            sponsorName = sponsorAmount > 0 and profile.driver_name or nil,
-            houseCut = 0
-        }
-        
-        -- 主催者を自動参加
-        if RegisterSessionParticipant(sessionId, source, {isHost = true}) then
-            return {
-                success = true, 
-                sessionId = sessionId,
-                participants = GetSessionParticipantList(sessionId),  -- 主催者のロビーに自分を表示する
-                race = race,
-                isBetMode = isBetMode,
-                entryFee = entryFee,
-                sponsorAmount = sponsorAmount,
-                initialPrizePool = sponsorAmount,
-                totalCost = entryFee + sponsorAmount
-            }
-        end
+    if not sessionId then
+        return {success = false, message = 'セッション作成に失敗しました'}
     end
     
-    return {success = false, message = 'セッション作成に失敗しました'}
+    -- スポンサー金の徴収
+    if sponsorAmount > 0 then
+        local currency = GetConfigValue('Race.currency', 'cash')
+        if not Player.Functions.RemoveMoney(currency, sponsorAmount, 'race-sponsor') then
+            -- 支払い失敗時はセッション削除
+            MySQL.query.await('DELETE FROM qbx_race_sessions WHERE id = ?', {sessionId})
+            return {success = false, message = 'スポンサー金の支払いに失敗しました'}
+        end
+        
+        -- スポンサー履歴に記録
+        MySQL.insert([[
+            INSERT INTO qbx_race_sponsors (session_id, sponsor_citizenid, sponsor_driver_name, amount, sponsor_type) 
+            VALUES (?, ?, ?, ?, 'host')
+        ]], {sessionId, Player.PlayerData.citizenid, profile.driver_name, sponsorAmount})
+        
+        print(string.format('[CAM Racing] スポンサー記録: %s が $%s をセッション %d に提供', 
+            profile.driver_name, FormatMoney(sponsorAmount), sessionId))
+    end
+    
+    -- アクティブセッション登録
+    ActiveSessions[sessionId] = {
+        id = sessionId,
+        raceId = raceId,
+        race = race,
+        host = source,
+        hostCitizenid = Player.PlayerData.citizenid,
+        hostName = profile.driver_name,
+        participants = {},
+        status = 'lobby',
+        countdownDuration = countdownDuration,
+        startPoint = race.checkpoints[1],
+        createdAt = os.time(),
+        
+        -- 掛け金・スポンサー情報
+        isBetMode = isBetMode,
+        entryFee = entryFee,
+        prizePool = sponsorAmount,  -- 初期プール = スポンサー金のみ
+        sponsorAmount = sponsorAmount,
+        sponsorName = sponsorAmount > 0 and profile.driver_name or nil,
+        houseCut = 0
+    }
+    
+    -- 主催者を自動参加（主催者も参加費を払う）
+    local ok, err = RegisterSessionParticipant(sessionId, source, {isHost = true, vehicleModel = data.vehicleModel})
+    if not ok then
+        CancelSessionWithRefund(sessionId, nil)
+        return {success = false, message = err or 'セッション作成に失敗しました'}
+    end
+    
+    return {
+        success = true, 
+        sessionId = sessionId,
+        participants = GetSessionParticipantList(sessionId),  -- 主催者のロビーに自分を表示する
+        race = race,
+        isBetMode = isBetMode,
+        entryFee = entryFee,
+        sponsorAmount = sponsorAmount,
+        initialPrizePool = ActiveSessions[sessionId] and ActiveSessions[sessionId].prizePool or sponsorAmount,
+        totalCost = entryFee + sponsorAmount
+    }
+end
+
+lib.callback.register('qbx_racing:server:createMultiSession', function(source, data)
+    return RunExclusive(source, function()
+        return CreateMultiSession(source, type(data) == 'table' and data or {})
+    end)
 end)
 
 -- セッション参加
-lib.callback.register('qbx_racing:server:joinSession', function(source, sessionId)
-    local session = ActiveSessions[sessionId]
-    if not session then 
-        return {success = false, message = 'セッションが見つかりません'} 
-    end
-    
-    if session.status ~= 'lobby' then
-        return {success = false, message = 'このセッションは既に開始されています'}
-    end
-    
-    if FindPlayerActiveSession(source) then
-        return {success = false, message = '既に別のセッションに参加しています'}
-    end
-    
-    local maxParticipants = Config.Multiplayer and Config.Multiplayer.maxParticipants or 16
-    if #session.participants >= maxParticipants then
-        return {success = false, message = '参加人数が上限に達しています'}
-    end
-    
-    if RegisterSessionParticipant(sessionId, source, {}) then
+lib.callback.register('qbx_racing:server:joinSession', function(source, sessionId, vehicleModel)
+    return RunExclusive(source, function()
+        local session = ActiveSessions[sessionId]
+        if not session then 
+            return {success = false, message = 'セッションが見つかりません'} 
+        end
+        
+        if session.status ~= 'lobby' then
+            return {success = false, message = 'このセッションは既に開始されています'}
+        end
+        
+        if FindPlayerActiveSession(source) then
+            return {success = false, message = '既に別のセッションに参加しています'}
+        end
+        
+        local maxParticipants = GetConfigValue('Multiplayer.maxParticipants', 16)
+        if #session.participants >= maxParticipants then
+            return {success = false, message = '参加人数が上限に達しています'}
+        end
+        
+        local ok, err = RegisterSessionParticipant(sessionId, source, {vehicleModel = vehicleModel})
+        if not ok then
+            return {success = false, message = err or '参加処理に失敗しました'}
+        end
+        
         BroadcastSessionUpdate(sessionId)
         return {
             success = true,
-            participants = GetSessionParticipantList(sessionId)
+            participants = GetSessionParticipantList(sessionId),
+            entryFee = session.isBetMode and session.entryFee or 0,
+            prizePool = session.prizePool
         }
-    end
-    
-    return {success = false, message = '参加処理に失敗しました'}
+    end)
 end)
 
 -- アクティブセッション一覧
@@ -650,84 +825,108 @@ end)
 -- 参加者登録（修正版 - 参加費徴収）
 -- ===================================
 function RegisterSessionParticipant(sessionId, source, options)
+    options = options or {}
     local Player = GetPlayer(source)
-    if not Player then return false end
+    if not Player then return false, 'プレイヤーデータが見つかりません' end
+    local citizenid = Player.PlayerData.citizenid
     
-    local profile = GetDriverProfile(Player.PlayerData.citizenid)
-    if not profile then return false end
+    local profile = GetDriverProfile(citizenid)
+    if not profile then return false, 'ドライバープロフィールが必要です' end
     
     local session = ActiveSessions[sessionId]
-    if not session then return false end
+    if not session or session.status ~= 'lobby' then return false, 'このセッションには参加できません' end
     
-    -- 重複チェック
     for _, participant in ipairs(session.participants) do
-        if participant.citizenid == Player.PlayerData.citizenid then
-            return false
+        if participant.citizenid == citizenid then
+            return false, '既にこのセッションに参加しています'
         end
     end
     
-    -- 掛け金モードの場合は参加費を徴収（ホストはスポンサー金で別途支払い済みのため免除可）
-    local entryPaid = false
-    if session.isBetMode and session.entryFee > 0 and not options.isHost then
-        local currency = GetConfigValue('Race.currency', 'cash')
-        local balance = Player.Functions.GetMoney(currency)
-        
-        if balance < session.entryFee then
-            TriggerClientEvent('ox_lib:notify', source, {
-                title = '参加失敗',
-                description = string.format('参加費$%dが不足しています（所持金: $%d）', session.entryFee, balance),
-                type = 'error'
-            })
-            return false
-        end
-        
-        -- 参加費徴収
-        if Player.Functions.RemoveMoney(currency, session.entryFee, 'race-entry-fee') then
-            session.prizePool = session.prizePool + session.entryFee
-            entryPaid = true
-            
-            -- データベース更新
-            MySQL.update.await('UPDATE qbx_race_sessions SET prize_pool = ? WHERE id = ?', {session.prizePool, sessionId})
-            
-            TriggerClientEvent('ox_lib:notify', source, {
-                title = '参加完了',
-                description = string.format('参加費$%dを支払いました（賞金プール: $%d）', session.entryFee, session.prizePool),
-                type = 'success'
-            })
-        else
-            return false
-        end
+    -- 掛け金モードの場合は参加費が必要（主催者も同じ）
+    local fee = session.isBetMode and session.entryFee or 0
+    local currency = GetConfigValue('Race.currency', 'cash')
+    if fee > 0 and Player.Functions.GetMoney(currency) < fee then
+        return false, string.format('参加費$%sが不足しています（所持金: $%s）',
+            FormatMoney(fee), FormatMoney(Player.Functions.GetMoney(currency)))
     end
     
-    -- 車両情報取得
-    local ped = GetPlayerPed(source)
-    local vehicle = GetVehiclePedIsIn(ped, false)
-    local vehicleModel = vehicle ~= 0 and GetDisplayNameFromVehicleModel(GetEntityModel(vehicle)) or 'なし'
+    -- 車両名はクライアントから受け取る（車両名を返すネイティブはサーバーにないため）
+    local vehicleModel = type(options.vehicleModel) == 'string' and options.vehicleModel:sub(1, 50) or ''
+    if vehicleModel == '' then vehicleModel = 'なし' end
     
-    -- データベース登録
+    -- 先に DB に登録し、成功してから参加費を徴収する（失敗時にお金だけ取られないように）
+    MySQL.query.await('DELETE FROM qbx_session_participants WHERE session_id = ? AND citizenid = ?', {sessionId, citizenid})
     local participantId = MySQL.insert.await([[
         INSERT INTO qbx_session_participants 
         (session_id, citizenid, driver_name, vehicle_model, status, entry_paid) 
-        VALUES (?, ?, ?, ?, 'entered', ?)
-    ]], {sessionId, Player.PlayerData.citizenid, profile.driver_name, vehicleModel, entryPaid and 1 or 0})
+        VALUES (?, ?, ?, ?, 'entered', 0)
+    ]], {sessionId, citizenid, profile.driver_name, vehicleModel})
+    if not participantId then return false, '参加処理に失敗しました' end
     
-    if participantId then
-        table.insert(session.participants, {
-            id = participantId,
-            source = source,
-            citizenid = Player.PlayerData.citizenid,
-            driverName = profile.driver_name,
-            vehicleModel = vehicleModel,
-            status = 'entered',
-            isHost = options.isHost or false,
-            entryPaid = entryPaid,
-            currentCheckpoint = 1,
-            currentLap = 1
-        })
-        return true
+    -- DB を待っている間に開始・満員・重複になっていないか確認
+    local maxParticipants = GetConfigValue('Multiplayer.maxParticipants', 16)
+    local canJoin = ActiveSessions[sessionId] == session and session.status == 'lobby'
+        and #session.participants < maxParticipants
+    for _, participant in ipairs(session.participants) do
+        if participant.citizenid == citizenid then canJoin = false end
     end
     
-    return false
+    local entryPaid = false
+    if canJoin and fee > 0 then
+        entryPaid = Player.Functions.RemoveMoney(currency, fee, 'race-entry-fee') and true or false
+        canJoin = entryPaid
+    end
+    
+    if not canJoin then
+        MySQL.query('DELETE FROM qbx_session_participants WHERE id = ?', {participantId})
+        return false, '参加できませんでした（開始済み・満員・所持金不足など）'
+    end
+    
+    table.insert(session.participants, {
+        id = participantId,
+        source = source,
+        citizenid = citizenid,
+        driverName = profile.driver_name,
+        vehicleModel = vehicleModel,
+        status = 'entered',
+        isHost = options.isHost or false,
+        entryPaid = entryPaid,
+        currentCheckpoint = 1,
+        currentLap = 1
+    })
+    
+    if entryPaid then
+        session.prizePool = session.prizePool + fee
+        MySQL.update('UPDATE qbx_session_participants SET entry_paid = 1 WHERE id = ?', {participantId})
+        MySQL.update('UPDATE qbx_race_sessions SET prize_pool = ? WHERE id = ?', {session.prizePool, sessionId})
+    end
+    
+    return true
+end
+
+-- ロビーから参加者を外す（参加費を返し、DB の行も消す）
+function RemoveLobbyParticipant(sessionId, index)
+    local session = ActiveSessions[sessionId]
+    local participant = session and session.participants[index]
+    if not participant then return end
+    
+    table.remove(session.participants, index)
+    MySQL.query('DELETE FROM qbx_session_participants WHERE session_id = ? AND citizenid = ?', {sessionId, participant.citizenid})
+    
+    if participant.entryPaid and session.entryFee > 0 then
+        participant.entryPaid = false
+        session.prizePool = math.max(0, session.prizePool - session.entryFee)
+        MySQL.update('UPDATE qbx_race_sessions SET prize_pool = ? WHERE id = ?', {session.prizePool, sessionId})
+        
+        local src = OnlineSource(participant)
+        if GiveMoney(src, participant.citizenid, session.entryFee, 'race-entry-refund') and src then
+            TriggerClientEvent('ox_lib:notify', src, {
+                title = '返金',
+                description = string.format('参加費$%sを返金しました', FormatMoney(session.entryFee)),
+                type = 'success'
+            })
+        end
+    end
 end
 
 -- セッション更新ブロードキャスト
@@ -743,7 +942,9 @@ function BroadcastSessionUpdate(sessionId)
     }
     
     for _, participant in ipairs(session.participants) do
-        TriggerClientEvent('qbx_racing:client:sessionUpdate', participant.source, updateData)
+        if not participant.disconnected then
+            TriggerClientEvent('qbx_racing:client:sessionUpdate', participant.source, updateData)
+        end
     end
 end
 
@@ -765,6 +966,24 @@ function GetSessionParticipantList(sessionId)
 end
 
 -- カウントダウン開始
+-- 車両クラス → GetVehicleType の種類（サーバーでは車両クラスを取得できないため種類で判定する）
+local VEHICLE_CLASS_TYPES = {
+    [8] = {'bike'}, [13] = {'bike'}, [14] = {'boat', 'submarine'},
+    [15] = {'heli'}, [16] = {'plane'}, [21] = {'train'}
+}
+
+local function GetAllowedVehicleTypes(raceVehicleType)
+    local vehicleConfig = Config.VehicleTypes and Config.VehicleTypes[raceVehicleType]
+    local classes = vehicleConfig and vehicleConfig.allowedClasses or {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
+    local allowed = {}
+    for _, class in ipairs(classes) do
+        for _, vehicleType in ipairs(VEHICLE_CLASS_TYPES[class] or {'automobile'}) do
+            allowed[vehicleType] = true
+        end
+    end
+    return allowed
+end
+
 RegisterNetEvent('qbx_racing:server:startCountdown', function(sessionId)
     local src = source
     local session = ActiveSessions[sessionId]
@@ -773,7 +992,7 @@ RegisterNetEvent('qbx_racing:server:startCountdown', function(sessionId)
         return
     end
     
-    local minParticipants = Config.Multiplayer and Config.Multiplayer.minParticipants or 2
+    local minParticipants = GetConfigValue('Multiplayer.minParticipants', 2)
     if #session.participants < minParticipants then
         TriggerClientEvent('ox_lib:notify', src, {
             title = 'エラー',
@@ -783,35 +1002,22 @@ RegisterNetEvent('qbx_racing:server:startCountdown', function(sessionId)
         return
     end
     
-    session.status = 'countdown'
-    MySQL.update.await('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'countdown', sessionId})
-    
     -- 有効な参加者をチェック（対象車両に乗ってスタート地点付近にいる人）
-    local startRadius = Config.Multiplayer and Config.Multiplayer.countdownRestrictions
-        and Config.Multiplayer.countdownRestrictions.startAreaRadius or 30.0
+    local startRadius = GetConfigValue('Multiplayer.countdownRestrictions.startAreaRadius', 30.0)
     local startCoords = session.startPoint and vector3(session.startPoint.x, session.startPoint.y, session.startPoint.z)
+    local allowedTypes = GetAllowedVehicleTypes(session.race.vehicle_type)
     local validParticipants = {}
     for _, participant in ipairs(session.participants) do
-        local ped = GetPlayerPed(participant.source)
-        local vehicle = GetVehiclePedIsIn(ped, false)
-        
-        if vehicle ~= 0 and (not startCoords or #(GetEntityCoords(vehicle) - startCoords) <= startRadius) then
-            local vehicleClass = GetVehicleClass(vehicle)
-            local allowedClasses = Config.VehicleTypes and Config.VehicleTypes[session.race.vehicle_type] and 
-                                   Config.VehicleTypes[session.race.vehicle_type].allowedClasses or {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
-            
-            for _, allowedClass in ipairs(allowedClasses) do
-                if vehicleClass == allowedClass then
-                    table.insert(validParticipants, participant.source)
-                    break
-                end
+        if not participant.disconnected then
+            local vehicle = GetVehiclePedIsIn(GetPlayerPed(participant.source), false)
+            if vehicle ~= 0 and allowedTypes[GetVehicleType(vehicle)]
+                and (not startCoords or #(GetEntityCoords(vehicle) - startCoords) <= startRadius) then
+                table.insert(validParticipants, participant.source)
             end
         end
     end
     
     if #validParticipants < minParticipants then
-        session.status = 'lobby'
-        MySQL.update.await('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'lobby', sessionId})
         TriggerClientEvent('ox_lib:notify', src, {
             title = 'エラー',
             description = string.format('レースに出られる参加者が%d人です（最低%d人）。全員が対象の車両に乗ってスタート地点（半径%dm以内）に集まっているか確認してください',
@@ -820,6 +1026,9 @@ RegisterNetEvent('qbx_racing:server:startCountdown', function(sessionId)
         })
         return
     end
+    
+    session.status = 'countdown'
+    MySQL.update('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'countdown', sessionId})
     
     -- カウントダウンスレッド
     CreateThread(function()
@@ -835,7 +1044,7 @@ RegisterNetEvent('qbx_racing:server:startCountdown', function(sessionId)
         end
         
         -- カウントダウンループ
-        while countdown > 0 and ActiveSessions[sessionId] and ActiveSessions[sessionId].status == 'countdown' do
+        while countdown > 0 and ActiveSessions[sessionId] == session and session.status == 'countdown' do
             for _, participantSource in ipairs(validParticipants) do
                 TriggerClientEvent('qbx_racing:client:countdownTick', participantSource, {
                     sessionId = sessionId,
@@ -848,7 +1057,7 @@ RegisterNetEvent('qbx_racing:server:startCountdown', function(sessionId)
         end
         
         -- レース開始
-        if ActiveSessions[sessionId] and ActiveSessions[sessionId].status == 'countdown' then
+        if ActiveSessions[sessionId] == session and session.status == 'countdown' then
             StartMultiplayerRace(sessionId, validParticipants)
         end
     end)
@@ -862,35 +1071,42 @@ function SetParticipantStatus(sessionId, participant, status)
 end
 
 -- スタート直前に人数が足りなくなった時などのセッション中止（参加費・スポンサー金を返金）
+-- セッション中止（参加費・スポンサー金を返金）
+-- reason が nil のときは通知しない（作成失敗時など）
 function CancelSessionWithRefund(sessionId, reason)
     local session = ActiveSessions[sessionId]
     if not session then return end
     
-    session.status = 'cancelled'
-    MySQL.update.await('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'cancelled', sessionId})
-    local currency = GetConfigValue('Race.currency', 'cash')
-    
-    for _, p in ipairs(session.participants) do
-        if session.isBetMode and p.entryPaid and session.entryFee > 0 then
-            local pPlayer = GetPlayer(p.source)
-            if pPlayer then
-                pPlayer.Functions.AddMoney(currency, session.entryFee, 'race-entry-refund')
-            end
-        end
-        TriggerClientEvent('qbx_racing:client:sessionCancelled', p.source, {
-            sessionId = sessionId,
-            reason = reason .. (session.isBetMode and '（参加費は返金済み）' or '')
-        })
-    end
-    
-    if session.sponsorAmount and session.sponsorAmount > 0 and session.host then
-        local hostPlayer = GetPlayer(session.host)
-        if hostPlayer then
-            hostPlayer.Functions.AddMoney(currency, session.sponsorAmount, 'race-sponsor-refund')
-        end
-    end
-    
     ActiveSessions[sessionId] = nil
+    session.status = 'cancelled'
+    MySQL.update('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'cancelled', sessionId})
+    
+    local hasRefund = session.isBetMode and session.entryFee > 0
+    for _, participant in ipairs(session.participants) do
+        if participant.entryPaid and session.entryFee > 0 then
+            participant.entryPaid = false
+            GiveMoney(OnlineSource(participant), participant.citizenid, session.entryFee, 'race-entry-refund')
+        end
+        
+        local src = OnlineSource(participant)
+        if src and reason then
+            TriggerClientEvent('qbx_racing:client:sessionCancelled', src, {
+                sessionId = sessionId,
+                reason = reason .. (hasRefund and '（参加費は返金済み）' or '')
+            })
+        end
+    end
+    
+    if session.sponsorAmount and session.sponsorAmount > 0 then
+        local hostSrc = HostSource(session)
+        if GiveMoney(hostSrc, session.hostCitizenid, session.sponsorAmount, 'race-sponsor-refund') and hostSrc and reason then
+            TriggerClientEvent('ox_lib:notify', hostSrc, {
+                title = '返金',
+                description = string.format('スポンサー金$%sを返金しました', FormatMoney(session.sponsorAmount)),
+                type = 'success'
+            })
+        end
+    end
 end
 
 -- マルチプレイヤーレース開始
@@ -903,15 +1119,18 @@ function StartMultiplayerRace(sessionId, validParticipants)
     for _, participantSource in ipairs(validParticipants) do
         isValid[participantSource] = true
     end
+    local function canRace(participant)
+        return not participant.disconnected and participant.status ~= 'retired' and isValid[participant.source]
+    end
     
     -- カウントダウン中の退出・切断で最低人数を下回った場合は中止
     local racerCount = 0
     for _, participant in ipairs(session.participants) do
-        if participant.status ~= 'retired' and isValid[participant.source] then
+        if canRace(participant) then
             racerCount = racerCount + 1
         end
     end
-    local minParticipants = Config.Multiplayer and Config.Multiplayer.minParticipants or 2
+    local minParticipants = GetConfigValue('Multiplayer.minParticipants', 2)
     if racerCount < minParticipants then
         CancelSessionWithRefund(sessionId, string.format('カウントダウン中に参加者が抜けて%d人未満になったため、レースを中止しました', minParticipants))
         return
@@ -919,24 +1138,47 @@ function StartMultiplayerRace(sessionId, validParticipants)
     
     session.status = 'racing'
     session.startTime = os.time()
+    session.startTimer = GetGameTimer()
+    session.finishCount = 0
+    session.checkpointCount = #(session.race.checkpoints or {})
+    session.totalLaps = session.race.race_type == 'sprint' and 1 or math.max(1, ToInteger(session.race.laps) or 1)
+    session.minFinishMs = CalculateMinRaceTimeMs(session.race)
     
-    MySQL.update.await('UPDATE qbx_race_sessions SET status = ?, start_time = NOW() WHERE id = ?', {'racing', sessionId})
+    MySQL.update('UPDATE qbx_race_sessions SET status = ?, start_time = NOW() WHERE id = ?', {'racing', sessionId})
     
     local racers = {}
+    local poolChanged = false
     for _, participant in ipairs(session.participants) do
-        if participant.status == 'retired' then
-            -- カウントダウン中に退出した人
-        elseif isValid[participant.source] then
+        if canRace(participant) then
+            participant.currentCheckpoint = 1
+            participant.currentLap = 1
             table.insert(racers, participant.source)
             SetParticipantStatus(sessionId, participant, 'racing')
-        else
-            -- 走らない人が 'racing' のまま残るとレースが終わらないため、対象外にする
+        elseif participant.status ~= 'retired' then
+            -- 走らない人が 'racing' のまま残るとレースが終わらないため、対象外にする（参加費は返す）
             SetParticipantStatus(sessionId, participant, 'excluded')
-            TriggerClientEvent('qbx_racing:client:sessionCancelled', participant.source, {
-                sessionId = sessionId,
-                reason = 'スタート時に対象の車両でスタート地点付近にいなかったため、レースに参加できませんでした'
-            })
+            local refunded = false
+            if participant.entryPaid and session.entryFee > 0 then
+                participant.entryPaid = false
+                session.prizePool = math.max(0, session.prizePool - session.entryFee)
+                poolChanged = true
+                refunded = GiveMoney(OnlineSource(participant), participant.citizenid, session.entryFee, 'race-entry-refund')
+                MySQL.update('UPDATE qbx_session_participants SET entry_paid = 0 WHERE session_id = ? AND citizenid = ?',
+                    {sessionId, participant.citizenid})
+            end
+            
+            local src = OnlineSource(participant)
+            if src then
+                TriggerClientEvent('qbx_racing:client:sessionCancelled', src, {
+                    sessionId = sessionId,
+                    reason = 'スタート時に対象の車両でスタート地点付近にいなかったため、レースに参加できませんでした'
+                        .. (refunded and '（参加費は返金済み）' or '')
+                })
+            end
         end
+    end
+    if poolChanged then
+        MySQL.update('UPDATE qbx_race_sessions SET prize_pool = ? WHERE id = ?', {session.prizePool, sessionId})
     end
     
     -- 全参加者にレース開始通知
@@ -962,11 +1204,29 @@ function StartProgressSyncThread(sessionId)
         local session = ActiveSessions[sessionId]
         if not session then return end
         
-        local syncInterval = Config.Multiplayer and Config.Multiplayer.progressSyncInterval or 500
+        local syncInterval = GetConfigValue('Multiplayer.progressSyncInterval', 500)
+        local maxDuration = GetConfigValue('Multiplayer.maxRaceDuration', 1800) * 1000
+        local finishTimeout = GetConfigValue('Multiplayer.finishTimeout', 180) * 1000
         
         while session.status == 'racing' and ActiveSessions[sessionId] == session do
-            local progressData = {}
+            -- 制限時間（レース全体・1位ゴール後）を過ぎたら、まだ走っている人はリタイア扱い
+            local now = GetGameTimer()
+            if now - session.startTimer > maxDuration
+                or (session.firstFinishAt and now - session.firstFinishAt > finishTimeout) then
+                for _, participant in ipairs(session.participants) do
+                    if participant.status == 'racing' then
+                        SetParticipantStatus(sessionId, participant, 'retired')
+                        local src = OnlineSource(participant)
+                        if src then
+                            TriggerClientEvent('qbx_racing:client:raceTimeUp', src, {sessionId = sessionId})
+                        end
+                    end
+                end
+                CheckSessionComplete(sessionId)
+                break
+            end
             
+            local progressData = {}
             for _, participant in ipairs(session.participants) do
                 if participant.status == 'racing' then
                     progressData[participant.source] = {
@@ -979,10 +1239,12 @@ function StartProgressSyncThread(sessionId)
             end
             
             for _, participant in ipairs(session.participants) do
-                if participant.status == 'racing' then
-                    TriggerClientEvent('qbx_racing:client:progressUpdate', participant.source, {
+                local src = OnlineSource(participant)
+                if src and participant.status == 'racing' then
+                    TriggerClientEvent('qbx_racing:client:progressUpdate', src, {
                         sessionId = sessionId,
-                        progressData = progressData
+                        progressData = progressData,
+                        finishedCount = session.finishCount or 0
                     })
                 end
             end
@@ -996,15 +1258,23 @@ end
 RegisterNetEvent('qbx_racing:server:updateProgress', function(sessionId, checkpoint, lap)
     local src = source
     local session = ActiveSessions[sessionId]
-    
     if not session or session.status ~= 'racing' then return end
     
-    for _, participant in ipairs(session.participants) do
-        if participant.source == src then
-            participant.currentCheckpoint = checkpoint or 1
-            participant.currentLap = lap or 1
-            break
-        end
+    local participant = FindParticipant(session, src)
+    checkpoint, lap = ToInteger(checkpoint), ToInteger(lap)
+    if not participant or participant.status ~= 'racing' or not checkpoint or not lap then return end
+    
+    -- チェックポイントは1つずつ順番にしか進めない（飛ばした報告は受け付けない）
+    local nextCheckpoint, nextLap
+    if participant.currentCheckpoint > session.checkpointCount then
+        nextCheckpoint, nextLap = 2, participant.currentLap + 1
+    else
+        nextCheckpoint, nextLap = participant.currentCheckpoint + 1, participant.currentLap
+    end
+    
+    if checkpoint == nextCheckpoint and lap == nextLap and lap <= session.totalLaps then
+        participant.currentCheckpoint = checkpoint
+        participant.currentLap = lap
     end
 end)
 
@@ -1013,156 +1283,92 @@ end)
 -- ===================================
 RegisterNetEvent('qbx_racing:server:finishMultiRace', function(sessionId, timeMs, vehicleModel)
     local src = source
-    local Player = GetPlayer(src)
-    if not Player then return end
-    
     local session = ActiveSessions[sessionId]
-    if not session then return end
-    
-    local profile = GetDriverProfile(Player.PlayerData.citizenid)
-    if not profile then return end
+    if not session or session.status ~= 'racing' then return end
     
     -- 走行中の参加者からのゴールだけ受け付ける（二重のゴールや不参加者による賞金の受け取りを防ぐ）
-    local finisher = nil
-    for _, participant in ipairs(session.participants) do
-        if participant.source == src then
-            finisher = participant
-            break
-        end
-    end
-    if session.status ~= 'racing' or not finisher or finisher.status ~= 'racing' then return end
+    local finisher = FindParticipant(session, src)
+    if not finisher or finisher.status ~= 'racing' then return end
     
-    -- 順位計算
-    local finishedCount = 0
-    for _, participant in ipairs(session.participants) do
-        if participant.status == 'finished' then
-            finishedCount = finishedCount + 1
-        end
+    -- 全チェックポイントを順番に通過したか（サーバーが受け取った進捗で確認）
+    if finisher.currentLap ~= session.totalLaps or finisher.currentCheckpoint ~= session.checkpointCount + 1 then
+        print(('^3[CAM Racing]^7 ゴールを受け付けませんでした（チェックポイント未通過）: %s session=%d'):format(
+            finisher.driverName, sessionId))
+        return
     end
-    local position = finishedCount + 1
     
-    -- 参加者情報更新
-    for _, participant in ipairs(session.participants) do
-        if participant.source == src then
-            participant.status = 'finished'
-            participant.finishTime = timeMs
-            participant.position = position
-            break
-        end
+    -- タイムはサーバーの経過時間と大きくずれていればサーバー側の値を使う
+    local serverElapsed = GetGameTimer() - session.startTimer
+    if serverElapsed < session.minFinishMs then
+        print(('^1[CAM Racing]^7 不正なゴールの可能性: %s session=%d 経過=%dms 最短=%dms'):format(
+            finisher.driverName, sessionId, serverElapsed, session.minFinishMs))
+        SetParticipantStatus(sessionId, finisher, 'retired')
+        CheckSessionComplete(sessionId)
+        return
+    end
+    timeMs = ToInteger(timeMs)
+    if not timeMs or math.abs(timeMs - serverElapsed) > 5000 then
+        timeMs = serverElapsed
+    end
+    vehicleModel = type(vehicleModel) == 'string' and vehicleModel ~= '' and vehicleModel:sub(1, 50) or finisher.vehicleModel or '不明'
+    
+    -- 順位はここで待ちなしに確定させる（切断者がいても順位がずれないようにカウンターで管理）
+    session.finishCount = (session.finishCount or 0) + 1
+    local position = session.finishCount
+    finisher.status = 'finished'
+    finisher.finishTime = timeMs
+    finisher.position = position
+    if position == 1 then
+        session.firstFinishAt = GetGameTimer()
     end
     
     -- データベース更新
-    MySQL.update.await([[
+    MySQL.update([[
         UPDATE qbx_session_participants 
         SET status = 'finished', finish_time_ms = ?, final_position = ? 
         WHERE session_id = ? AND citizenid = ?
-    ]], {timeMs, position, sessionId, Player.PlayerData.citizenid})
+    ]], {timeMs, position, sessionId, finisher.citizenid})
     
-    MySQL.insert.await([[
+    MySQL.insert([[
         INSERT INTO qbx_race_times (race_id, driver_name, citizenid, time_ms, vehicle_model) 
         VALUES (?, ?, ?, ?, ?)
-    ]], {session.raceId, profile.driver_name, Player.PlayerData.citizenid, timeMs, vehicleModel})
-    
-    -- ===================================
-    -- スポンサー対応賞金計算
-    -- ===================================
-    local reward = 0
-    local rewardMessage = ''
-    
-    if session.isBetMode and session.prizePool > 0 then
-        -- ハウスカット計算
-        local houseCutConfig = GetConfigValue('Race.betting.houseCut', {enabled = false})
-        local houseCutAmount = 0
-        
-        if houseCutConfig.enabled then
-            houseCutAmount = math.floor(session.prizePool * (houseCutConfig.percentage or 10) / 100)
-        end
-        
-        local distributionPool = session.prizePool - houseCutAmount
-        
-        -- 順位別賞金配分
-        local distribution = GetConfigValue('Race.betting.distribution', {
-            [1] = 50, [2] = 30, [3] = 20
-        })
-        
-        local percentage = distribution[position]
-        if percentage and percentage > 0 then
-            reward = math.floor(distributionPool * percentage / 100)
-            
-            -- 賞金支払い
-            local currency = GetConfigValue('Race.currency', 'cash')
-            Player.Functions.AddMoney(currency, reward, 'race-prize')
-            
-            -- 詳細メッセージ作成
-            local medals = {'🥇 優勝', '🥈 準優勝', '🥉 3位'}
-            local positionText = medals[position] or (position .. '位')
-            
-            if session.sponsorAmount > 0 then
-                rewardMessage = string.format('%s賞金: $%s\n（総プール $%s = 参加費 + スポンサー $%s）', 
-                    positionText, FormatMoney(reward), FormatMoney(session.prizePool), FormatMoney(session.sponsorAmount))
-            else
-                rewardMessage = string.format('%s賞金: $%s', positionText, FormatMoney(reward))
-            end
-            
-            -- データベースに記録
-            MySQL.update.await([[
-                UPDATE qbx_session_participants 
-                SET prize_amount = ? 
-                WHERE session_id = ? AND citizenid = ?
-            ]], {reward, sessionId, Player.PlayerData.citizenid})
-        else
-            rewardMessage = '賞金圏外'
-        end
-        
-        -- ハウスカット処理
-        if houseCutAmount > 0 then
-            local recipient = houseCutConfig.recipient or 'none'
-            if recipient == 'society' and houseCutConfig.societyName then
-                pcall(function()
-                    exports['qb-management']:AddMoney(houseCutConfig.societyName, houseCutAmount)
-                end)
-            end
-        end
-    else
-        rewardMessage = 'タイム記録のみ'
-    end
+    ]], {session.raceId, finisher.driverName, finisher.citizenid, timeMs, vehicleModel})
     
     -- 統計更新
     if GetConfigValue('Race.updateStats', true) then
-        MySQL.query.await('UPDATE qbx_driver_profiles SET total_races = total_races + 1 WHERE citizenid = ?', {Player.PlayerData.citizenid})
+        MySQL.update('UPDATE qbx_driver_profiles SET total_races = total_races + 1 WHERE citizenid = ?', {finisher.citizenid})
         if position == 1 then
-            MySQL.query.await('UPDATE qbx_driver_profiles SET total_wins = total_wins + 1 WHERE citizenid = ?', {Player.PlayerData.citizenid})
+            MySQL.update('UPDATE qbx_driver_profiles SET total_wins = total_wins + 1 WHERE citizenid = ?', {finisher.citizenid})
         end
     end
     
-    -- 完了通知
+    -- 完了通知（賞金はレース終了時にまとめて支払う）
     local timeFormatted = string.format("%.2f秒", timeMs / 1000)
     local medals = {'🥇', '🥈', '🥉'}
     local medal = medals[position] or '🏁'
+    local rewardMessage = session.isBetMode and session.prizePool > 0
+        and '賞金はレース終了時に支払われます' or 'タイム記録のみ'
     
     TriggerClientEvent('ox_lib:notify', src, {
         title = string.format('%s %d位でゴール！', medal, position),
         description = string.format('%s\n%s', timeFormatted, rewardMessage),
-        type = reward > 0 and 'success' or 'inform',
+        type = position <= 3 and 'success' or 'inform',
         duration = 10000
     })
     
-    -- 全参加者に完了通知（スポンサー情報含む）
+    -- 他の参加者に完了通知
     for _, participant in ipairs(session.participants) do
-        local notificationMsg = string.format('%s: %s', profile.driver_name, timeFormatted)
-        if reward > 0 then
-            notificationMsg = notificationMsg .. string.format(' (賞金: $%s)', FormatMoney(reward))
+        local otherSrc = OnlineSource(participant)
+        if otherSrc and participant ~= finisher
+            and (participant.status == 'racing' or participant.status == 'finished') then
+            TriggerClientEvent('qbx_racing:client:participantFinished', otherSrc, {
+                sessionId = sessionId,
+                finisher = finisher.driverName,
+                position = position,
+                time = timeMs,
+                timeFormatted = timeFormatted
+            })
         end
-        
-        TriggerClientEvent('qbx_racing:client:participantFinished', participant.source, {
-            sessionId = sessionId,
-            finisher = profile.driver_name,
-            position = position,
-            time = timeMs,
-            timeFormatted = timeFormatted,
-            reward = reward,
-            message = notificationMsg
-        })
     end
     
     -- 全員完了チェックと最終結果
@@ -1182,16 +1388,78 @@ function CheckSessionComplete(sessionId)
     end
     
     session.status = 'finished'
-    MySQL.update.await('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'finished', sessionId})
+    MySQL.update('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'finished', sessionId})
     
-    -- 最終結果発表（スポンサー情報含む）
+    -- 賞金の支払いと最終結果発表
+    PayoutPrizes(sessionId)
     BroadcastFinalResults(sessionId)
     
-    SetTimeout(300000, function()
+    SetTimeout(GetConfigValue('Multiplayer.cleanupDelay', 300000), function()
         if ActiveSessions[sessionId] == session then
             ActiveSessions[sessionId] = nil
         end
     end)
+end
+
+-- 賞金の支払い（レース終了時にまとめて）
+-- 入賞者が配分表より少ない場合（2人レースなど）は、実際の入賞者の割合でプール全額を分ける
+function PayoutPrizes(sessionId)
+    local session = ActiveSessions[sessionId]
+    if not session or not session.isBetMode or session.prizePool <= 0 then return end
+    
+    local finishers = {}
+    for _, participant in ipairs(session.participants) do
+        if participant.status == 'finished' then
+            table.insert(finishers, participant)
+        end
+    end
+    table.sort(finishers, function(a, b) return (a.position or 999) < (b.position or 999) end)
+    
+    -- 誰もゴールしなかった場合は参加費とスポンサー金を返す
+    if #finishers == 0 then
+        for _, participant in ipairs(session.participants) do
+            if participant.entryPaid and session.entryFee > 0 then
+                participant.entryPaid = false
+                GiveMoney(OnlineSource(participant), participant.citizenid, session.entryFee, 'race-entry-refund')
+            end
+        end
+        if session.sponsorAmount > 0 then
+            GiveMoney(HostSource(session), session.hostCitizenid, session.sponsorAmount, 'race-sponsor-refund')
+        end
+        session.refundedAll = true
+        return
+    end
+    
+    -- ハウスカット（1レースにつき1回）
+    local houseCutConfig = GetConfigValue('Race.betting.houseCut', {enabled = false})
+    local houseCutAmount = 0
+    if type(houseCutConfig) == 'table' and houseCutConfig.enabled then
+        houseCutAmount = math.floor(session.prizePool * (houseCutConfig.percentage or 10) / 100)
+    end
+    local distributionPool = session.prizePool - houseCutAmount
+    
+    local distribution = GetConfigValue('Race.betting.distribution', {[1] = 50, [2] = 30, [3] = 20})
+    local totalShare = 0
+    for _, participant in ipairs(finishers) do
+        totalShare = totalShare + (distribution[participant.position] or 0)
+    end
+    if totalShare <= 0 then return end
+    
+    for _, participant in ipairs(finishers) do
+        local share = distribution[participant.position] or 0
+        local prize = math.floor(distributionPool * share / totalShare)
+        if prize > 0 and GiveMoney(OnlineSource(participant), participant.citizenid, prize, 'race-prize') then
+            participant.prize = prize
+            MySQL.update('UPDATE qbx_session_participants SET prize_amount = ? WHERE session_id = ? AND citizenid = ?',
+                {prize, sessionId, participant.citizenid})
+        end
+    end
+    
+    if houseCutAmount > 0 and houseCutConfig.recipient == 'society' and houseCutConfig.societyName then
+        pcall(function()
+            exports['qb-management']:AddMoney(houseCutConfig.societyName, houseCutAmount)
+        end)
+    end
 end
 
 -- レース中のリタイア
@@ -1200,11 +1468,9 @@ RegisterNetEvent('qbx_racing:server:retireRace', function(sessionId)
     local session = ActiveSessions[sessionId]
     if not session or session.status ~= 'racing' then return end
     
-    for _, participant in ipairs(session.participants) do
-        if participant.source == src and participant.status == 'racing' then
-            SetParticipantStatus(sessionId, participant, 'retired')
-            break
-        end
+    local participant = FindParticipant(session, src)
+    if participant and participant.status == 'racing' then
+        SetParticipantStatus(sessionId, participant, 'retired')
     end
     
     CheckSessionComplete(sessionId)
@@ -1219,9 +1485,12 @@ function BroadcastFinalResults(sessionId)
     
     -- 順位順にソート
     local results = {}
+    local retired = {}
     for _, participant in ipairs(session.participants) do
         if participant.status == 'finished' then
             table.insert(results, participant)
+        elseif participant.status == 'retired' then
+            table.insert(retired, participant)
         end
     end
     
@@ -1230,38 +1499,85 @@ function BroadcastFinalResults(sessionId)
     end)
     
     -- 結果サマリー
+    local medals = {'🥇', '🥈', '🥉'}
     local summary = '🏁 最終結果\n\n'
     for i, participant in ipairs(results) do
-        local medals = {'🥇', '🥈', '🥉'}
         local medal = medals[i] or (i .. '位')
         local time = participant.finishTime and string.format("%.2f秒", participant.finishTime / 1000) or 'DNF'
-        summary = summary .. string.format('%s %s - %s\n', medal, participant.driverName, time)
+        local prize = participant.prize and string.format('（賞金 $%s）', FormatMoney(participant.prize)) or ''
+        summary = summary .. string.format('%s %s - %s%s\n', medal, participant.driverName, time, prize)
+    end
+    for _, participant in ipairs(retired) do
+        summary = summary .. string.format('DNF %s\n', participant.driverName)
     end
     
     if session.isBetMode and session.prizePool > 0 then
-        summary = summary .. string.format('\n💰 総賞金プール: $%d', session.prizePool)
+        if session.refundedAll then
+            summary = summary .. '\n💰 ゴールした人がいなかったため、参加費とスポンサー金を返金しました'
+        else
+            summary = summary .. string.format('\n💰 総賞金プール: $%s', FormatMoney(session.prizePool))
+        end
     end
     
-    -- 全参加者に送信
+    -- 全参加者に送信（レースに出られなかった人を除く）
     for _, participant in ipairs(session.participants) do
-        TriggerClientEvent('ox_lib:notify', participant.source, {
-            title = 'レース終了',
-            description = summary,
-            type = 'inform',
-            duration = 15000
-        })
+        local src = OnlineSource(participant)
+        if src and participant.status ~= 'excluded' then
+            TriggerClientEvent('ox_lib:notify', src, {
+                title = 'レース終了',
+                description = summary,
+                type = 'inform',
+                duration = 15000
+            })
+        end
     end
 end
 
 -- ソロレース完了処理
 
+-- ソロレース開始（GO の瞬間にクライアントから届く）
+RegisterNetEvent('qbx_racing:server:soloRaceStarted', function(raceId)
+    local src = source
+    raceId = ToInteger(raceId)
+    if not raceId then return end
+    soloRuns[src] = {raceId = raceId, startedAt = GetGameTimer()}
+end)
+
 RegisterNetEvent('qbx_racing:server:finishRace', function(raceId, timeMs, vehicleModel)
     local src = source
+    local run = soloRuns[src]
+    soloRuns[src] = nil
+    raceId = ToInteger(raceId)
+    if not run or run.raceId ~= raceId then return end
+    local serverElapsed = GetGameTimer() - run.startedAt
+    
     local Player = GetPlayer(src)
     if not Player then return end
     
     local profile = GetDriverProfile(Player.PlayerData.citizenid)
     if not profile then return end
+    
+    -- 削除済みのレースには記録しない
+    local race = MySQL.single.await('SELECT id, race_type, laps FROM qbx_races WHERE id = ? AND is_active = 1', {raceId})
+    if not race then return end
+    race.checkpoints = MySQL.query.await([[
+        SELECT x, y, z, radius FROM qbx_race_checkpoints WHERE race_id = ? ORDER BY checkpoint_order ASC
+    ]], {raceId}) or {}
+    
+    -- 速すぎるゴールは記録しない
+    local minTime = CalculateMinRaceTimeMs(race)
+    if serverElapsed < minTime then
+        print(('^1[CAM Racing]^7 不正なソロ記録の可能性: %s race=%d 経過=%dms 最短=%dms'):format(
+            profile.driver_name, raceId, serverElapsed, minTime))
+        return
+    end
+    
+    -- タイムはサーバーの経過時間と大きくずれていればサーバー側の値を使う
+    timeMs = ToInteger(timeMs)
+    if not timeMs or math.abs(timeMs - serverElapsed) > 5000 then
+        timeMs = serverElapsed
+    end
+    vehicleModel = type(vehicleModel) == 'string' and vehicleModel ~= '' and vehicleModel:sub(1, 50) or '不明'
     
     -- タイム記録のみ
     MySQL.insert.await([[
@@ -1341,99 +1657,32 @@ RegisterNetEvent('qbx_racing:server:leaveSession', function(sessionId)
     local session = ActiveSessions[sessionId]
     if not session then return end
     
+    local participant, index = FindParticipant(session, src)
+    if not participant then return end
+    
     -- ロビー以外（カウントダウン・レース中）の退出はリタイア扱い（途中でセッションを解散・返金しない）
     if session.status ~= 'lobby' then
-        for _, participant in ipairs(session.participants) do
-            if participant.source == src and participant.status ~= 'finished' and participant.status ~= 'excluded' then
-                SetParticipantStatus(sessionId, participant, 'retired')
-            end
+        if participant.status ~= 'finished' and participant.status ~= 'excluded' and participant.status ~= 'retired' then
+            SetParticipantStatus(sessionId, participant, 'retired')
         end
         CheckSessionComplete(sessionId)
         return
     end
     
-    for i, participant in ipairs(session.participants) do
-        if participant.source == src then
-            -- 参加費の返金（ロビー状態の場合のみ）
-            if session.status == 'lobby' and session.isBetMode and participant.entryPaid then
-                local Player = GetPlayer(src)
-                if Player and session.entryFee > 0 then
-                    local currency = GetConfigValue('Race.currency', 'cash')
-                    Player.Functions.AddMoney(currency, session.entryFee, 'race-entry-refund')
-                    session.prizePool = session.prizePool - session.entryFee
-                    MySQL.update.await('UPDATE qbx_race_sessions SET prize_pool = ? WHERE id = ?', {session.prizePool, sessionId})
-                    
-                    TriggerClientEvent('ox_lib:notify', src, {
-                        title = '返金',
-                        description = string.format('参加費$%sを返金しました', FormatMoney(session.entryFee)),
-                        type = 'success'
-                    })
-                end
-            end
-            
-            table.remove(session.participants, i)
-            
-            -- DB更新
-            MySQL.update.await([[
-                DELETE FROM qbx_session_participants 
-                WHERE session_id = ? AND citizenid = (
-                    SELECT citizenid FROM qbx_driver_profiles WHERE driver_name = ?
-                )
-            ]], {sessionId, participant.driverName})
-            
-            -- 主催者が離脱した場合 → セッションキャンセル＋スポンサー返金
-            if session.host == src then
-                session.status = 'cancelled'
-                MySQL.update.await('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'cancelled', sessionId})
-                
-                -- スポンサー金返金
-                if session.sponsorAmount and session.sponsorAmount > 0 then
-                    local hostPlayer = GetPlayer(src)
-                    if hostPlayer then
-                        local currency = GetConfigValue('Race.currency', 'cash')
-                        hostPlayer.Functions.AddMoney(currency, session.sponsorAmount, 'race-sponsor-refund')
-                        TriggerClientEvent('ox_lib:notify', src, {
-                            title = '返金',
-                            description = string.format('スポンサー金$%sを返金しました', FormatMoney(session.sponsorAmount)),
-                            type = 'success'
-                        })
-                    end
-                end
-                
-                -- 残りの参加者に参加費返金＋通知
-                for _, p in ipairs(session.participants) do
-                    if session.isBetMode and p.entryPaid and session.entryFee > 0 then
-                        local pPlayer = GetPlayer(p.source)
-                        if pPlayer then
-                            local currency = GetConfigValue('Race.currency', 'cash')
-                            pPlayer.Functions.AddMoney(currency, session.entryFee, 'race-entry-refund')
-                        end
-                    end
-                    
-                    TriggerClientEvent('qbx_racing:client:sessionCancelled', p.source, {
-                        sessionId = sessionId,
-                        reason = '主催者が退出しました'
-                    })
-                    TriggerClientEvent('ox_lib:notify', p.source, {
-                        title = 'セッション終了',
-                        description = '主催者が退出したため、セッションが終了しました（参加費は返金済み）',
-                        type = 'error'
-                    })
-                end
-                
-                ActiveSessions[sessionId] = nil
-            else
-                BroadcastSessionUpdate(sessionId)
-                
-                TriggerClientEvent('ox_lib:notify', src, {
-                    title = 'セッション退出',
-                    description = 'セッションから退出しました',
-                    type = 'inform'
-                })
-            end
-            break
-        end
+    -- 主催者が離脱した場合 → セッション中止（全員に返金）
+    if participant.isHost then
+        CancelSessionWithRefund(sessionId, '主催者が退出したため、セッションが終了しました')
+        return
     end
+    
+    RemoveLobbyParticipant(sessionId, index)
+    BroadcastSessionUpdate(sessionId)
+    
+    TriggerClientEvent('ox_lib:notify', src, {
+        title = 'セッション退出',
+        description = 'セッションから退出しました',
+        type = 'inform'
+    })
 end)
 
 -- ===================================
@@ -1442,7 +1691,7 @@ end)
 function StartSessionTimeoutThread()
     CreateThread(function()
         local checkInterval = 60000 -- 1分ごとにチェック
-        local sessionTimeout = Config.Multiplayer and Config.Multiplayer.sessionTimeout or 600
+        local sessionTimeout = GetConfigValue('Multiplayer.sessionTimeout', 600)
         
         while true do
             Wait(checkInterval)
@@ -1451,53 +1700,14 @@ function StartSessionTimeoutThread()
             local sessionsToCancel = {}
             
             for sessionId, session in pairs(ActiveSessions) do
-                if session.status == 'lobby' and session.createdAt then
-                    local elapsed = currentTime - session.createdAt
-                    if elapsed >= sessionTimeout then
-                        table.insert(sessionsToCancel, sessionId)
-                    end
+                if session.status == 'lobby' and session.createdAt and currentTime - session.createdAt >= sessionTimeout then
+                    table.insert(sessionsToCancel, sessionId)
                 end
             end
             
             for _, sessionId in ipairs(sessionsToCancel) do
-                local session = ActiveSessions[sessionId]
-                if session then
-                    session.status = 'cancelled'
-                    MySQL.update.await('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'cancelled', sessionId})
-                    
-                    -- 参加者に返金＋通知
-                    for _, p in ipairs(session.participants) do
-                        if session.isBetMode and p.entryPaid and session.entryFee > 0 then
-                            local pPlayer = GetPlayer(p.source)
-                            if pPlayer then
-                                local currency = GetConfigValue('Race.currency', 'cash')
-                                pPlayer.Functions.AddMoney(currency, session.entryFee, 'race-timeout-refund')
-                            end
-                        end
-                        
-                        TriggerClientEvent('qbx_racing:client:sessionCancelled', p.source, {
-                            sessionId = sessionId,
-                            reason = 'セッションがタイムアウトしました'
-                        })
-                        TriggerClientEvent('ox_lib:notify', p.source, {
-                            title = 'セッションタイムアウト',
-                            description = '一定時間開始されなかったため、セッションが終了しました（参加費は返金済み）',
-                            type = 'error'
-                        })
-                    end
-                    
-                    -- スポンサー返金
-                    if session.sponsorAmount and session.sponsorAmount > 0 and session.host then
-                        local hostPlayer = GetPlayer(session.host)
-                        if hostPlayer then
-                            local currency = GetConfigValue('Race.currency', 'cash')
-                            hostPlayer.Functions.AddMoney(currency, session.sponsorAmount, 'race-sponsor-timeout-refund')
-                        end
-                    end
-                    
-                    print(string.format('[CAM Racing] セッションタイムアウト: ID=%d (%d秒経過)', sessionId, sessionTimeout))
-                    ActiveSessions[sessionId] = nil
-                end
+                print(string.format('[CAM Racing] セッションタイムアウト: ID=%d (%d秒経過)', sessionId, sessionTimeout))
+                CancelSessionWithRefund(sessionId, '一定時間スタートされなかったため、セッションが終了しました')
             end
         end
     end)
@@ -1511,6 +1721,10 @@ end
 -- ===================================
 -- タブレット連携（Config.UI.mode = 'tablet' のときアプリとして登録）
 -- ===================================
+-- アプリ登録に成功したかをクライアントに伝える（失敗時はクライアントが通常の画面を使う）
+local TABLET_STATE_KEY = GetCurrentResourceName() .. ':tabletApp'
+GlobalState[TABLET_STATE_KEY] = false
+
 local function RegisterTabletApp()
     local ui = Config.UI or {}
     local tablet = ui.tablet or {}
@@ -1535,10 +1749,20 @@ local function RegisterTabletApp()
         print(('^1[CAM Racing]^7 タブレット (%s) へのアプリ「%s」(id: %s) の登録に失敗しました。'
             .. 'ID が別のリソースで使われている場合は Config.UI.tablet.app.id を変えるか、'
             .. 'サーバーコンソールで cam_tablet_releaseid %s を実行してください'):format(tabletResource, app.label, app.id, app.id))
+        GlobalState[TABLET_STATE_KEY] = false
         return
     end
+    GlobalState[TABLET_STATE_KEY] = true
     print(('^2[CAM Racing]^7 タブレット (%s) にアプリ「%s」を登録しました'):format(tabletResource, app.label))
 end
+
+-- タブレットが止まったらアプリも使えない
+AddEventHandler('onResourceStop', function(resourceName)
+    local tablet = Config.UI and Config.UI.tablet or {}
+    if resourceName == (tablet.resource or 'cam_tablet') then
+        GlobalState[TABLET_STATE_KEY] = false
+    end
+end)
 
 -- タブレットにレーシングアプリがインストールされているか（/race で開く前の確認）
 lib.callback.register('qbx_racing:server:hasTabletApp', function(source)
@@ -1601,6 +1825,25 @@ AddEventHandler('onResourceStart', function(resourceName)
     print('^2[CAM Racing]^7 マルチプレイヤーシステム: ' .. 
           (Config.Multiplayer and Config.Multiplayer.enabled and '有効' or '無効'))
     
+    -- 前回サーバーが落ちたときに終わっていなかった掛けレースの参加費・スポンサー金を返金
+    local staleSessions = MySQL.query.await([[
+        SELECT id, entry_fee, sponsor_amount, sponsor_citizenid FROM qbx_race_sessions
+        WHERE status IN ('lobby', 'countdown', 'racing') AND is_bet_mode = 1
+    ]]) or {}
+    for _, stale in ipairs(staleSessions) do
+        if (tonumber(stale.entry_fee) or 0) > 0 then
+            local paid = MySQL.query.await([[
+                SELECT citizenid FROM qbx_session_participants WHERE session_id = ? AND entry_paid = 1
+            ]], {stale.id}) or {}
+            for _, row in ipairs(paid) do
+                GiveMoney(nil, row.citizenid, stale.entry_fee, 'race-entry-refund')
+            end
+        end
+        if (tonumber(stale.sponsor_amount) or 0) > 0 and stale.sponsor_citizenid then
+            GiveMoney(nil, stale.sponsor_citizenid, stale.sponsor_amount, 'race-sponsor-refund')
+        end
+    end
+    
     -- 既存のセッションクリーンアップ
     MySQL.update.await("UPDATE qbx_race_sessions SET status = 'cancelled' WHERE status IN ('lobby', 'countdown', 'racing')")
     ActiveSessions = {}
@@ -1613,9 +1856,15 @@ end)
 AddEventHandler('onResourceStop', function(resourceName)
     if GetCurrentResourceName() ~= resourceName then return end
     
-    -- アクティブセッションを終了状態に更新
-    for sessionId, _ in pairs(ActiveSessions) do
-        MySQL.update.await('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'cancelled', sessionId})
+    -- 終わっていないセッションは中止して返金（レース中の賞金は終了時払いなので、まだ誰にも払われていない）
+    local unfinished = {}
+    for sessionId, session in pairs(ActiveSessions) do
+        if session.status == 'lobby' or session.status == 'countdown' or session.status == 'racing' then
+            table.insert(unfinished, sessionId)
+        end
+    end
+    for _, sessionId in ipairs(unfinished) do
+        CancelSessionWithRefund(sessionId, 'レースシステムが再起動されたため、セッションが終了しました')
     end
     
     print('^1[CAM Racing]^7 サーバーサイド停止完了')
@@ -1624,52 +1873,34 @@ end)
 -- プレイヤー切断時のクリーンアップ
 AddEventHandler('playerDropped', function(reason)
     local src = source
+    busyPlayers[src] = nil
+    soloRuns[src] = nil
     
-    -- アクティブセッションから削除
-    for sessionId, session in pairs(ActiveSessions) do
-        for i, participant in ipairs(session.participants) do
-            if participant.source == src then
-                -- ロビー中の参加費返金は不要（切断なので送金先がない）
-                if (session.status == 'racing' or session.status == 'countdown')
-                    and participant.status ~= 'finished' and participant.status ~= 'excluded' and participant.status ~= 'retired' then
-                    SetParticipantStatus(sessionId, participant, 'retired')
-                end
-                table.remove(session.participants, i)
-                
-                -- レース中・カウントダウン中の切断はリタイア扱い（主催者でもセッションは続ける）
-                if session.status == 'racing' or session.status == 'countdown' then
-                    CheckSessionComplete(sessionId)
-                -- 主催者が切断した場合はセッション終了
-                elseif session.host == src then
-                    session.status = 'cancelled'
-                    MySQL.update.await('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'cancelled', sessionId})
-                    
-                    -- 残りの参加者に参加費返金＋通知
-                    for _, p in ipairs(session.participants) do
-                        if session.isBetMode and p.entryPaid and session.entryFee > 0 then
-                            local pPlayer = GetPlayer(p.source)
-                            if pPlayer then
-                                local currency = GetConfigValue('Race.currency', 'cash')
-                                pPlayer.Functions.AddMoney(currency, session.entryFee, 'race-entry-refund-host-dropped')
-                            end
-                        end
-                        
-                        TriggerClientEvent('qbx_racing:client:sessionCancelled', p.source, {
-                            sessionId = sessionId,
-                            reason = '主催者が切断しました'
-                        })
-                        TriggerClientEvent('ox_lib:notify', p.source, {
-                            title = 'セッション終了',
-                            description = '主催者が切断したため、セッションが終了しました（参加費は返金済み）',
-                            type = 'error'
-                        })
-                    end
-                    
-                    ActiveSessions[sessionId] = nil
+    local sessionIds = {}
+    for sessionId in pairs(ActiveSessions) do
+        table.insert(sessionIds, sessionId)
+    end
+    
+    for _, sessionId in ipairs(sessionIds) do
+        local session = ActiveSessions[sessionId]
+        local participant, index = session and FindParticipant(session, src)
+        if participant then
+            participant.disconnected = true
+            
+            if session.status == 'lobby' then
+                if participant.isHost then
+                    -- 主催者が切断 → セッション中止（全員に返金、本人分は citizenid で返金）
+                    CancelSessionWithRefund(sessionId, '主催者が切断したため、セッションが終了しました')
                 else
+                    RemoveLobbyParticipant(sessionId, index)
                     BroadcastSessionUpdate(sessionId)
                 end
-                break
+            else
+                -- カウントダウン・レース中はリタイア扱い（順位と結果のため一覧からは消さない）
+                if participant.status ~= 'finished' and participant.status ~= 'excluded' and participant.status ~= 'retired' then
+                    SetParticipantStatus(sessionId, participant, 'retired')
+                end
+                CheckSessionComplete(sessionId)
             end
         end
     end
