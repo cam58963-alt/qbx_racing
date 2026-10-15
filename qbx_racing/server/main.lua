@@ -571,11 +571,10 @@ lib.callback.register('qbx_racing:server:createMultiSession', function(source, d
         
         -- 主催者を自動参加
         if RegisterSessionParticipant(sessionId, source, {isHost = true}) then
-            -- 主催者のロビーに自分を表示する
-            BroadcastSessionUpdate(sessionId)
             return {
                 success = true, 
                 sessionId = sessionId,
+                participants = GetSessionParticipantList(sessionId),  -- 主催者のロビーに自分を表示する
                 race = race,
                 isBetMode = isBetMode,
                 entryFee = entryFee,
@@ -787,13 +786,16 @@ RegisterNetEvent('qbx_racing:server:startCountdown', function(sessionId)
     session.status = 'countdown'
     MySQL.update.await('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'countdown', sessionId})
     
-    -- 有効な参加者をチェック
+    -- 有効な参加者をチェック（対象車両に乗ってスタート地点付近にいる人）
+    local startRadius = Config.Multiplayer and Config.Multiplayer.countdownRestrictions
+        and Config.Multiplayer.countdownRestrictions.startAreaRadius or 30.0
+    local startCoords = session.startPoint and vector3(session.startPoint.x, session.startPoint.y, session.startPoint.z)
     local validParticipants = {}
     for _, participant in ipairs(session.participants) do
         local ped = GetPlayerPed(participant.source)
         local vehicle = GetVehiclePedIsIn(ped, false)
         
-        if vehicle ~= 0 then
+        if vehicle ~= 0 and (not startCoords or #(GetEntityCoords(vehicle) - startCoords) <= startRadius) then
             local vehicleClass = GetVehicleClass(vehicle)
             local allowedClasses = Config.VehicleTypes and Config.VehicleTypes[session.race.vehicle_type] and 
                                    Config.VehicleTypes[session.race.vehicle_type].allowedClasses or {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
@@ -812,8 +814,8 @@ RegisterNetEvent('qbx_racing:server:startCountdown', function(sessionId)
         MySQL.update.await('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'lobby', sessionId})
         TriggerClientEvent('ox_lib:notify', src, {
             title = 'エラー',
-            description = string.format('レースに出られる参加者が%d人です（最低%d人）。全員が対象の車両に乗っているか確認してください',
-                #validParticipants, minParticipants),
+            description = string.format('レースに出られる参加者が%d人です（最低%d人）。全員が対象の車両に乗ってスタート地点（半径%dm以内）に集まっているか確認してください',
+                #validParticipants, minParticipants, math.floor(startRadius)),
             type = 'error'
         })
         return
@@ -882,7 +884,7 @@ function StartMultiplayerRace(sessionId, validParticipants)
             participant.status = 'excluded'
             TriggerClientEvent('qbx_racing:client:sessionCancelled', participant.source, {
                 sessionId = sessionId,
-                reason = 'スタート時に対象の車両に乗っていなかったため、レースに参加できませんでした'
+                reason = 'スタート時に対象の車両でスタート地点付近にいなかったため、レースに参加できませんでした'
             })
         end
     end

@@ -503,7 +503,8 @@ Config.Multiplayer = {
     countdownRestrictions = {
         freezeVehicle = true,          -- 車両を完全ロック
         disableControls = true,        -- 操作を無効化
-        maxDistanceFromStart = 3.0,    -- スタート地点からの最大距離（メートル）
+        maxDistanceFromStart = 3.0,    -- カウントダウン開始位置から動ける最大距離（メートル）
+        startAreaRadius = 30.0,        -- スタート地点からこの半径内にいる人だけがレースに出られる（メートル）
         teleportBackToStart = true,    -- 範囲外に出たら戻す
         showWarnings = true            -- 警告表示
     }

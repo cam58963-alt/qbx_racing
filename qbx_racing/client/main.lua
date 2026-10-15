@@ -303,6 +303,7 @@ function ShowSessionCreateDialog(race)
             if result.success then
                 currentSession = result.sessionId
                 isInSession = true
+                sessionParticipants = result.participants or {}
                 
                 local message = ''
                 if result.isBetMode then
@@ -718,7 +719,7 @@ RegisterNUICallback('createSession', function(data, cb)
         if result and result.success then
             currentSession = result.sessionId
             isInSession = true
-            sessionParticipants = {}
+            sessionParticipants = result.participants or {}
             
             -- UIを閉じてロビー画面へ
             CloseMenuUI()
@@ -1384,6 +1385,7 @@ function StartCountdownRestrictions(sessionId, startPoint, duration)
     isInCountdown = true
     local endTime = GetGameTimer() + (duration * 1000)
     -- 全員をスタート地点1点に戻すと車両が重なるため、カウントダウン開始時の各自の位置で固定する
+    -- （スタート地点付近にいるかはサーバーが startAreaRadius で確認済み）
     local initialVehicle = GetVehiclePedIsIn(PlayerPedId(), false)
     local lockCoords = initialVehicle ~= 0 and GetEntityCoords(initialVehicle)
         or vector3(startPoint.x, startPoint.y, startPoint.z)
