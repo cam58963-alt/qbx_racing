@@ -2204,30 +2204,58 @@ local SCHEMA_COLUMNS = {
     {'qbx_race_turn_guides', 'segments', "INT DEFAULT 1 AFTER `direction`"}
 }
 
+-- 1つずつ実行して、失敗したものはログに出して続ける。戻り値: すべて成功したら true
 local function EnsureDatabaseSchema()
-    for _, statement in ipairs(SCHEMA_TABLES) do
-        MySQL.query.await(statement)
-    end
-    
-    for _, column in ipairs(SCHEMA_COLUMNS) do
-        local exists = MySQL.scalar.await([[
-            SELECT COUNT(*) FROM information_schema.COLUMNS
-            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?
-        ]], {column[1], column[2]})
-        if tonumber(exists) == 0 then
-            MySQL.query.await(('ALTER TABLE `%s` ADD COLUMN `%s` %s'):format(column[1], column[2], column[3]))
+    local allOk = true
+    local function try(label, fn)
+        local ok, err = pcall(fn)
+        if not ok then
+            allOk = false
+            print(('^1[CAM Racing]^7 データベースの準備（%s）に失敗しました: %s'):format(label, tostring(err)))
         end
     end
     
-    -- 参加者ステータスにリタイア・対象外を追加（既存サーバー向け）
-    local statusType = MySQL.scalar.await([[
-        SELECT COLUMN_TYPE FROM information_schema.COLUMNS
-        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'qbx_session_participants' AND COLUMN_NAME = 'status'
-    ]])
-    if statusType and not tostring(statusType):find('retired', 1, true) then
-        MySQL.query.await([[ALTER TABLE `qbx_session_participants` MODIFY COLUMN `status`
-            ENUM('entered', 'ready', 'racing', 'finished', 'retired', 'excluded') DEFAULT 'entered']])
+    for _, statement in ipairs(SCHEMA_TABLES) do
+        try(statement:match('`([%w_]+)`') or 'テーブル作成', function()
+            MySQL.query.await(statement)
+        end)
     end
+    
+    for _, column in ipairs(SCHEMA_COLUMNS) do
+        try(column[1] .. '.' .. column[2], function()
+            local exists = MySQL.scalar.await([[
+                SELECT COUNT(*) FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?
+            ]], {column[1], column[2]})
+            if tonumber(exists) == 0 then
+                MySQL.query.await(('ALTER TABLE `%s` ADD COLUMN `%s` %s'):format(column[1], column[2], column[3]))
+            end
+        end)
+    end
+    
+    -- 参加者ステータスにリタイア・対象外を追加（既存サーバー向け）
+    try('qbx_session_participants.status', function()
+        local statusType = MySQL.scalar.await([[
+            SELECT COLUMN_TYPE FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'qbx_session_participants' AND COLUMN_NAME = 'status'
+        ]])
+        if statusType and not tostring(statusType):find('retired', 1, true) then
+            MySQL.query.await([[ALTER TABLE `qbx_session_participants` MODIFY COLUMN `status`
+                ENUM('entered', 'ready', 'racing', 'finished', 'retired', 'excluded') DEFAULT 'entered']])
+        end
+    end)
+    
+    return allOk
+end
+
+-- 返金・賞金の復旧に使うテーブルがそろっているか（他の準備が失敗していても、これがあれば復旧はできる）
+local function IsPayoutLedgerReady()
+    local count = MySQL.scalar.await([[
+        SELECT COUNT(*) FROM information_schema.TABLES
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME IN ('qbx_race_payouts', 'qbx_race_sessions', 'qbx_session_participants', 'qbx_race_sponsors')
+    ]])
+    return tonumber(count) == 4
 end
 
 -- 起動時の処理を1つずつ実行する（1つが失敗しても残りは続ける）
@@ -2245,13 +2273,21 @@ AddEventHandler('onResourceStart', function(resourceName)
     print('^2[CAM Racing]^7 サーバーサイド起動完了')
     
     -- テーブルの作成・不足している列の追加（install.sql を流していなくても動くように）
-    local schemaReady = RunStartupStep('データベースの準備', EnsureDatabaseSchema)
-    if not schemaReady then
-        print('^1[CAM Racing]^7 データベースの準備に失敗しました。sql/install.sql を手動で実行してください')
+    local schemaOk = false
+    RunStartupStep('データベースの準備', function()
+        schemaOk = EnsureDatabaseSchema()
+    end)
+    if not schemaOk then
+        print('^1[CAM Racing]^7 データベースの準備の一部に失敗しました。上のログを確認するか、sql/install.sql を手動で実行してください')
     end
     print('^2[CAM Racing]^7 マルチプレイヤーシステム: ' .. 
           (Config.Multiplayer and Config.Multiplayer.enabled and '有効' or '無効'))
-    local ledgerReady = schemaReady
+    
+    -- 返金・賞金の復旧は、必要なテーブルがあれば他の準備の失敗に関係なく行う
+    local ledgerReady = false
+    RunStartupStep('支払い台帳の確認', function()
+        ledgerReady = IsPayoutLedgerReady()
+    end)
     
     -- 前回サーバーが落ちたときに終わっていなかったセッション →
     -- 参加費（支払い済みの記録がある分）とスポンサー金（スポンサー履歴がある分）の返金予定を記録して中止にする
