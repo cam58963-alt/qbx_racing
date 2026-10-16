@@ -2248,14 +2248,14 @@ local function EnsureDatabaseSchema()
     return allOk
 end
 
--- 返金・賞金の復旧に使うテーブルがそろっているか（他の準備が失敗していても、これがあれば復旧はできる）
-local function IsPayoutLedgerReady()
-    local count = MySQL.scalar.await([[
+-- 指定したテーブルがすべてあるか（他の準備が失敗していても、必要なテーブルがあれば復旧はできる）
+local function TablesExist(names)
+    local placeholders = string.rep('?', #names, ', ')
+    local count = MySQL.scalar.await(([[
         SELECT COUNT(*) FROM information_schema.TABLES
-        WHERE TABLE_SCHEMA = DATABASE()
-          AND TABLE_NAME IN ('qbx_race_payouts', 'qbx_race_sessions', 'qbx_session_participants', 'qbx_race_sponsors')
-    ]])
-    return tonumber(count) == 4
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (%s)
+    ]]):format(placeholders), names)
+    return tonumber(count) == #names
 end
 
 -- 起動時の処理を1つずつ実行する（1つが失敗しても残りは続ける）
@@ -2284,15 +2284,18 @@ AddEventHandler('onResourceStart', function(resourceName)
           (Config.Multiplayer and Config.Multiplayer.enabled and '有効' or '無効'))
     
     -- 返金・賞金の復旧は、必要なテーブルがあれば他の準備の失敗に関係なく行う
-    local ledgerReady = false
+    -- （未払いの支払いは台帳だけ、終わっていなかったセッションの返金はセッション関連のテーブルも必要）
+    local ledgerReady, recoveryReady = false, false
     RunStartupStep('支払い台帳の確認', function()
-        ledgerReady = IsPayoutLedgerReady()
+        ledgerReady = TablesExist({'qbx_race_payouts'})
+        recoveryReady = ledgerReady
+            and TablesExist({'qbx_race_sessions', 'qbx_session_participants', 'qbx_race_sponsors'})
     end)
     
     -- 前回サーバーが落ちたときに終わっていなかったセッション →
     -- 参加費（支払い済みの記録がある分）とスポンサー金（スポンサー履歴がある分）の返金予定を記録して中止にする
     -- （台帳が無いと返金予定を残せないので、その場合はセッションも中止にせず次回起動時に任せる）
-    if ledgerReady then
+    if recoveryReady then
         RunStartupStep('前回終わっていなかったセッションの返金', function()
             local staleSessions = MySQL.query.await([[
                 SELECT id, entry_fee FROM qbx_race_sessions WHERE status IN ('lobby', 'countdown', 'racing')
@@ -2323,8 +2326,10 @@ AddEventHandler('onResourceStart', function(resourceName)
                 end
             end
         end)
-        
-        -- 未払いの返金・賞金をすべて支払う（前回の途中で止まった分も含む）
+    end
+    
+    -- 未払いの返金・賞金をすべて支払う（前回の途中で止まった分も含む。台帳だけあればできる）
+    if ledgerReady then
         RunStartupStep('未払いの返金・賞金の支払い', function()
             SettlePayouts(nil)
         end)
