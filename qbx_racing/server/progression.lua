@@ -74,12 +74,16 @@ local function SlowCourseBonus(cfg, lengthM, targetMs, vehicleType)
     return slowness * (tonumber(bonus.weight) or 2.0)
 end
 
--- TA の報酬（レート × 単位額）。コースの長さ・チェックポイント数・目標タイム・平均速度から計算
+-- TA の報酬（レート × 単位額）。コースの長さ・チェックポイントの密度・目標タイム・平均速度から計算
+-- （チェックポイントは数ではなく 1km あたりの数で見る。長いコースほど数が増えるが、長さは距離で数えているため）
 local function CalculateTimeAttackReward(lengthM, gates, targetMs, vehicleType)
     local cfg = GetConfigValue('TimeAttack.reward', {})
     cfg = type(cfg) == 'table' and cfg or {}
-    local score = (lengthM / 1000) * (tonumber(cfg.distanceWeight) or 0.5)
-        + gates * (tonumber(cfg.checkpointWeight) or 0.05)
+    local km = lengthM / 1000
+    local density = km > 0 and gates / km or 0
+    density = math.min(density, tonumber(cfg.checkpointDensityCap) or 30)
+    local score = km * (tonumber(cfg.distanceWeight) or 0.5)
+        + density * (tonumber(cfg.checkpointDensityWeight) or 0.1)
         + (targetMs / 60000) * (tonumber(cfg.timeWeight) or 0.5)
         + SlowCourseBonus(cfg, lengthM, targetMs, vehicleType)
     local minRate = ToInteger(cfg.minRate) or 1

@@ -179,18 +179,21 @@ local function CalculateMinRaceTimeMs(race)
         return #(vector3(a.x, a.y, a.z) - vector3(b.x, b.y, b.z))
     end
     
+    -- 区間ごとに、両端のチェックポイントの判定半径ぶんは近道できるとみなす（区間が短ければ 0）
+    -- （チェックポイントが密なコースでも合計がマイナスにならないよう区間ごとに計算する）
+    local function segment(a, b)
+        local radiusA, radiusB = tonumber(a.radius) or 10.0, tonumber(b.radius) or 10.0
+        return math.max(0, dist(a, b) - radiusA - radiusB)
+    end
     local lapDistance = 0
     for i = 2, #checkpoints do
-        lapDistance = lapDistance + dist(checkpoints[i - 1], checkpoints[i])
+        lapDistance = lapDistance + segment(checkpoints[i - 1], checkpoints[i])
     end
     -- 周回は毎周スタート地点（CP1）に戻る（最終周もスタート地点がゴール）
-    local closing = (race.race_type ~= 'sprint' and #checkpoints > 1) and dist(checkpoints[#checkpoints], checkpoints[1]) or 0
-    local total = lapDistance * laps + closing * laps
-    
-    -- チェックポイントの判定半径ぶんの近道を差し引く
-    for _, cp in ipairs(checkpoints) do
-        total = total - 2 * (tonumber(cp.radius) or 10.0) * laps
+    if race.race_type ~= 'sprint' and #checkpoints > 1 then
+        lapDistance = lapDistance + segment(checkpoints[#checkpoints], checkpoints[1])
     end
+    local total = lapDistance * laps
     
     local maxSpeed = GetConfigValue('Security.antiCheat.maxSpeed', 500.0) / 3.6 -- km/h → m/s
     if total <= 0 or maxSpeed <= 0 then return 0 end

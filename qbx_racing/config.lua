@@ -162,7 +162,7 @@ Config.Checkpoint = {
     radius = 10.0,              -- チェックポイントの半径（メートル）
     height = 5.0,               -- マーカーの高さ
     minCheckpoints = 3,         -- 最低必要なチェックポイント数
-    maxCheckpoints = 50,        -- 最大チェックポイント数
+    maxCheckpoints = 500,       -- 最大チェックポイント数
     maxTurnGuides = 50,         -- 手動設置できる曲がり角ガイドの最大数
     
     -- 作成モード設定
@@ -465,16 +465,20 @@ Config.TimeAttack = {
     calibrationDrivers = 3,        -- そのうち必要なドライバーの人数（1人だけで目標タイムを決められないように）
     calibrationOutlierFactor = 1.5, -- ベストタイムの中央値のこの倍より遅いベストは平均から除く
 
-    -- 報酬 = レート × unit（レートはコースの長さ・チェックポイント数・目標タイムから自動計算）
-    -- スコア = 距離(km) × distanceWeight + チェックポイント数 × checkpointWeight + 目標タイム(分) × timeWeight
+    -- 報酬 = レート × unit（レートはコースの長さ・チェックポイントの密度・目標タイムから自動計算）
+    -- スコア = 距離(km) × distanceWeight
+    --        + 1kmあたりのチェックポイント数（最大 checkpointDensityCap）× checkpointDensityWeight
+    --        + 目標タイム(分) × timeWeight
     --        + 低速ボーナス（細道・カーブが多く平均速度が低いコースほど加算）
+    -- ※ チェックポイントは数ではなく密度で見る（長いコースは数が多くなるが、長さは距離で数えているため）
     -- レート = スコアを四捨五入して minRate ～ maxRate に収めたもの
     reward = {
         unit = 1000000,            -- レート1あたりの金額（100万）
         minRate = 1,               -- 最低レート（100万）
         maxRate = 15,              -- 最高レート（1500万）
         distanceWeight = 0.5,      -- 1km ごとに +0.5
-        checkpointWeight = 0.05,   -- チェックポイント 1個 ごとに +0.05（周回数ぶん数える）
+        checkpointDensityWeight = 0.1, -- 1kmあたりのチェックポイント 1個 ごとに +0.1（例: 2kmに30個 = 15個/km → +1.5）
+        checkpointDensityCap = 30,     -- 密度はこの値までで数える（最大 +3.0）
         timeWeight = 0.5,          -- 1分 ごとに +0.5
         
         -- 低速ボーナス = weight × (1 - 平均速度 / 基準速度)（平均速度が基準以上なら 0）

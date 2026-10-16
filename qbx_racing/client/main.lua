@@ -1339,7 +1339,8 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
                     end
                     
                     -- サーバーにレース作成リクエスト送信
-                    TriggerServerEvent('qbx_racing:server:createRace', {
+                    -- （チェックポイントが数百個あると大きくなるため、分割して送れる latent イベントを使う）
+                    TriggerLatentServerEvent('qbx_racing:server:createRace', 200000, {
                         name = raceCreationData.name,
                         description = raceCreationData.description,
                         vehicleType = raceCreationData.vehicleType,
