@@ -2038,6 +2038,198 @@ AddEventHandler(((Config.UI and Config.UI.tablet and Config.UI.tablet.resource) 
 
 CreateThread(RegisterTabletApp)
 
+-- ===================================
+-- データベースの準備（install.sql を流していないサーバーでも動くように、起動時に作る）
+-- ※ 外部キーは付けない（既存テーブルの id の型が違うと作成に失敗するため。
+--   レースは論理削除なので連鎖削除がなくても困らない）
+-- ===================================
+local SCHEMA_TABLES = {
+    [[
+        CREATE TABLE IF NOT EXISTS `qbx_driver_profiles` (
+            `citizenid` VARCHAR(50) PRIMARY KEY,
+            `driver_name` VARCHAR(50) UNIQUE NOT NULL,
+            `total_races` INT DEFAULT 0,
+            `total_wins` INT DEFAULT 0,
+            `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX `idx_driver_name` (`driver_name`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ]],
+    [[
+        CREATE TABLE IF NOT EXISTS `qbx_races` (
+            `id` INT AUTO_INCREMENT PRIMARY KEY,
+            `name` VARCHAR(100) NOT NULL,
+            `description` TEXT,
+            `vehicle_type` ENUM('car', 'heli', 'boat') NOT NULL,
+            `race_type` ENUM('circuit', 'sprint') DEFAULT 'circuit',
+            `laps` INT DEFAULT 1,
+            `min_participants` INT DEFAULT 2,
+            `max_participants` INT DEFAULT 16,
+            `creator_driver_name` VARCHAR(50),
+            `is_active` TINYINT(1) DEFAULT 1,
+            `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX `idx_vehicle_type` (`vehicle_type`),
+            INDEX `idx_race_type` (`race_type`),
+            INDEX `idx_active` (`is_active`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ]],
+    [[
+        CREATE TABLE IF NOT EXISTS `qbx_race_checkpoints` (
+            `id` INT AUTO_INCREMENT PRIMARY KEY,
+            `race_id` INT NOT NULL,
+            `checkpoint_order` INT NOT NULL,
+            `x` DOUBLE NOT NULL,
+            `y` DOUBLE NOT NULL,
+            `z` DOUBLE NOT NULL,
+            `radius` FLOAT DEFAULT 10.0,
+            INDEX `idx_race_order` (`race_id`, `checkpoint_order`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ]],
+    [[
+        CREATE TABLE IF NOT EXISTS `qbx_race_turn_guides` (
+            `id` INT AUTO_INCREMENT PRIMARY KEY,
+            `race_id` INT NOT NULL,
+            `checkpoint_order` INT NOT NULL,
+            `x` DOUBLE NOT NULL,
+            `y` DOUBLE NOT NULL,
+            `z` DOUBLE NOT NULL,
+            `direction` ENUM('left', 'right') NOT NULL,
+            `segments` INT DEFAULT 1,
+            INDEX `idx_race_guide` (`race_id`, `checkpoint_order`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ]],
+    [[
+        CREATE TABLE IF NOT EXISTS `qbx_race_times` (
+            `id` INT AUTO_INCREMENT PRIMARY KEY,
+            `race_id` INT NOT NULL,
+            `driver_name` VARCHAR(50) NOT NULL,
+            `citizenid` VARCHAR(50) NOT NULL,
+            `time_ms` INT NOT NULL,
+            `vehicle_model` VARCHAR(50) NOT NULL,
+            `completed_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX `idx_race_time` (`race_id`, `time_ms`),
+            INDEX `idx_driver` (`driver_name`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ]],
+    [[
+        CREATE TABLE IF NOT EXISTS `qbx_race_sessions` (
+            `id` INT AUTO_INCREMENT PRIMARY KEY,
+            `race_id` INT NOT NULL,
+            `host_citizenid` VARCHAR(50) NOT NULL,
+            `host_driver_name` VARCHAR(50) NOT NULL,
+            `session_name` VARCHAR(100) NOT NULL,
+            `status` ENUM('lobby', 'countdown', 'racing', 'finished', 'cancelled') DEFAULT 'lobby',
+            `countdown_duration` INT DEFAULT 10,
+            `start_time` TIMESTAMP NULL,
+            `is_bet_mode` TINYINT(1) DEFAULT 0,
+            `entry_fee` INT DEFAULT 0,
+            `prize_pool` INT DEFAULT 0,
+            `sponsor_amount` INT DEFAULT 0,
+            `sponsor_citizenid` VARCHAR(50) DEFAULT NULL,
+            `sponsor_name` VARCHAR(100) DEFAULT NULL,
+            `house_cut` INT DEFAULT 0,
+            `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX `idx_status` (`status`),
+            INDEX `idx_host` (`host_citizenid`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ]],
+    [[
+        CREATE TABLE IF NOT EXISTS `qbx_session_participants` (
+            `id` INT AUTO_INCREMENT PRIMARY KEY,
+            `session_id` INT NOT NULL,
+            `citizenid` VARCHAR(50) NOT NULL,
+            `driver_name` VARCHAR(50) NOT NULL,
+            `vehicle_model` VARCHAR(50),
+            `status` ENUM('entered', 'ready', 'racing', 'finished', 'retired', 'excluded') DEFAULT 'entered',
+            `current_checkpoint` INT DEFAULT 1,
+            `current_lap` INT DEFAULT 1,
+            `finish_time_ms` INT NULL,
+            `final_position` INT NULL,
+            `entry_paid` TINYINT(1) DEFAULT 0,
+            `prize_amount` INT DEFAULT 0,
+            UNIQUE KEY `unique_participant` (`session_id`, `citizenid`),
+            INDEX `idx_session` (`session_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ]],
+    [[
+        CREATE TABLE IF NOT EXISTS `qbx_session_progress` (
+            `session_id` INT NOT NULL,
+            `citizenid` VARCHAR(50) NOT NULL,
+            `checkpoint` INT NOT NULL,
+            `lap` INT NOT NULL,
+            `timestamp` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`session_id`, `citizenid`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ]],
+    [[
+        CREATE TABLE IF NOT EXISTS `qbx_race_sponsors` (
+            `id` INT AUTO_INCREMENT PRIMARY KEY,
+            `session_id` INT NOT NULL,
+            `sponsor_citizenid` VARCHAR(50) NOT NULL,
+            `sponsor_driver_name` VARCHAR(50) NOT NULL,
+            `amount` INT NOT NULL,
+            `sponsor_type` ENUM('host', 'participant') DEFAULT 'host',
+            `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX `idx_sponsor` (`sponsor_citizenid`),
+            INDEX `idx_amount` (`amount`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ]],
+    [[
+        CREATE TABLE IF NOT EXISTS `qbx_race_payouts` (
+            `id` INT AUTO_INCREMENT PRIMARY KEY,
+            `session_id` INT NOT NULL,
+            `citizenid` VARCHAR(50) NOT NULL,
+            `amount` INT NOT NULL,
+            `reason` VARCHAR(50) NOT NULL,
+            `paid` TINYINT(1) DEFAULT 0,
+            `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX `idx_unpaid` (`paid`),
+            INDEX `idx_session` (`session_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ]]
+}
+
+-- 古いバージョンのテーブルに足りない列（テーブル, 列, 定義）
+local SCHEMA_COLUMNS = {
+    {'qbx_races', 'description', "TEXT AFTER `name`"},
+    {'qbx_races', 'race_type', "ENUM('circuit', 'sprint') DEFAULT 'circuit' AFTER `vehicle_type`"},
+    {'qbx_race_sessions', 'is_bet_mode', "TINYINT(1) DEFAULT 0 AFTER `start_time`"},
+    {'qbx_race_sessions', 'entry_fee', "INT DEFAULT 0 AFTER `is_bet_mode`"},
+    {'qbx_race_sessions', 'prize_pool', "INT DEFAULT 0 AFTER `entry_fee`"},
+    {'qbx_race_sessions', 'sponsor_amount', "INT DEFAULT 0 AFTER `prize_pool`"},
+    {'qbx_race_sessions', 'sponsor_citizenid', "VARCHAR(50) DEFAULT NULL AFTER `sponsor_amount`"},
+    {'qbx_race_sessions', 'sponsor_name', "VARCHAR(100) DEFAULT NULL AFTER `sponsor_citizenid`"},
+    {'qbx_race_sessions', 'house_cut', "INT DEFAULT 0 AFTER `sponsor_name`"},
+    {'qbx_session_participants', 'entry_paid', "TINYINT(1) DEFAULT 0 AFTER `final_position`"},
+    {'qbx_session_participants', 'prize_amount', "INT DEFAULT 0 AFTER `entry_paid`"},
+    {'qbx_race_turn_guides', 'segments', "INT DEFAULT 1 AFTER `direction`"}
+}
+
+local function EnsureDatabaseSchema()
+    for _, statement in ipairs(SCHEMA_TABLES) do
+        MySQL.query.await(statement)
+    end
+    
+    for _, column in ipairs(SCHEMA_COLUMNS) do
+        local exists = MySQL.scalar.await([[
+            SELECT COUNT(*) FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?
+        ]], {column[1], column[2]})
+        if tonumber(exists) == 0 then
+            MySQL.query.await(('ALTER TABLE `%s` ADD COLUMN `%s` %s'):format(column[1], column[2], column[3]))
+        end
+    end
+    
+    -- 参加者ステータスにリタイア・対象外を追加（既存サーバー向け）
+    local statusType = MySQL.scalar.await([[
+        SELECT COLUMN_TYPE FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'qbx_session_participants' AND COLUMN_NAME = 'status'
+    ]])
+    if statusType and not tostring(statusType):find('retired', 1, true) then
+        MySQL.query.await([[ALTER TABLE `qbx_session_participants` MODIFY COLUMN `status`
+            ENUM('entered', 'ready', 'racing', 'finished', 'retired', 'excluded') DEFAULT 'entered']])
+    end
+end
+
 -- 起動時の処理を1つずつ実行する（1つが失敗しても残りは続ける）
 local function RunStartupStep(name, fn)
     local ok, err = pcall(fn)
@@ -2052,64 +2244,14 @@ AddEventHandler('onResourceStart', function(resourceName)
     
     print('^2[CAM Racing]^7 サーバーサイド起動完了')
     
-    -- 曲がり角ガイドのテーブルを作成（既存サーバー向け）
-    -- ※ 外部キーは付けない（既存の qbx_races の id の型が違うサーバーで作成に失敗するため。
-    --   レースは論理削除（is_active = 0）なので、ガイドが残っても困らない）
-    RunStartupStep('曲がり角ガイドのテーブル作成', function()
-        MySQL.query.await([[
-            CREATE TABLE IF NOT EXISTS `qbx_race_turn_guides` (
-                `id` INT AUTO_INCREMENT PRIMARY KEY,
-                `race_id` INT NOT NULL,
-                `checkpoint_order` INT NOT NULL,
-                `x` DOUBLE NOT NULL,
-                `y` DOUBLE NOT NULL,
-                `z` DOUBLE NOT NULL,
-                `direction` ENUM('left', 'right') NOT NULL,
-                `segments` INT DEFAULT 1,
-                INDEX `idx_race_guide` (`race_id`, `checkpoint_order`)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-        ]])
-        
-        -- 横に長いガイド用の列（このテーブルを先に作った既存サーバー向け）
-        local hasSegments = MySQL.scalar.await([[
-            SELECT COUNT(*) FROM information_schema.COLUMNS
-            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'qbx_race_turn_guides' AND COLUMN_NAME = 'segments'
-        ]])
-        if tonumber(hasSegments) == 0 then
-            MySQL.query.await('ALTER TABLE `qbx_race_turn_guides` ADD COLUMN `segments` INT DEFAULT 1 AFTER `direction`')
-        end
-    end)
-    
-    -- 参加者ステータスにリタイア・対象外を追加（既存サーバー向け）
-    RunStartupStep('参加者ステータスの更新', function()
-        local statusType = MySQL.scalar.await([[
-            SELECT COLUMN_TYPE FROM information_schema.COLUMNS
-            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'qbx_session_participants' AND COLUMN_NAME = 'status'
-        ]])
-        if statusType and not tostring(statusType):find('retired', 1, true) then
-            MySQL.query.await([[ALTER TABLE `qbx_session_participants` MODIFY COLUMN `status`
-                ENUM('entered', 'ready', 'racing', 'finished', 'retired', 'excluded') DEFAULT 'entered']])
-        end
-    end)
+    -- テーブルの作成・不足している列の追加（install.sql を流していなくても動くように）
+    local schemaReady = RunStartupStep('データベースの準備', EnsureDatabaseSchema)
+    if not schemaReady then
+        print('^1[CAM Racing]^7 データベースの準備に失敗しました。sql/install.sql を手動で実行してください')
+    end
     print('^2[CAM Racing]^7 マルチプレイヤーシステム: ' .. 
           (Config.Multiplayer and Config.Multiplayer.enabled and '有効' or '無効'))
-    
-    -- 支払い台帳（返金・賞金を確実に1回だけ払うため）
-    local ledgerReady = RunStartupStep('支払い台帳のテーブル作成', function()
-        MySQL.query.await([[
-            CREATE TABLE IF NOT EXISTS `qbx_race_payouts` (
-                `id` INT AUTO_INCREMENT PRIMARY KEY,
-                `session_id` INT NOT NULL,
-                `citizenid` VARCHAR(50) NOT NULL,
-                `amount` INT NOT NULL,
-                `reason` VARCHAR(50) NOT NULL,
-                `paid` TINYINT(1) DEFAULT 0,
-                `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                INDEX `idx_unpaid` (`paid`),
-                INDEX `idx_session` (`session_id`)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-        ]])
-    end)
+    local ledgerReady = schemaReady
     
     -- 前回サーバーが落ちたときに終わっていなかったセッション →
     -- 参加費（支払い済みの記録がある分）とスポンサー金（スポンサー履歴がある分）の返金予定を記録して中止にする
