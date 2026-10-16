@@ -221,6 +221,32 @@ local function CourseCheckpointAt(checkpoints, index)
     return checkpoints[index] or checkpoints[1]
 end
 
+-- サーバーから見たプレイヤーの車両（位置が取れない環境では false = 確認しない、乗っていなければ 0）
+local function GetServerPlayerVehicle(src)
+    local ped = GetPlayerPed(src)
+    if not ped or ped == 0 then return false end
+    return GetVehiclePedIsIn(ped, false)
+end
+
+-- サーバーで分かる車両の種類（GetVehicleType）がレースの車両タイプに合うか
+-- （細かいクラスはサーバーでは取れないので、車のコースを飛行機で走るような違いを防ぐ）
+local DEFAULT_SERVER_VEHICLE_TYPES = {
+    car = {'automobile', 'bike'},
+    heli = {'heli', 'plane'},
+    boat = {'boat', 'submarine'}
+}
+local function IsServerVehicleAllowed(vehicle, raceVehicleType)
+    if not vehicle or vehicle == 0 then return false end
+    local vehicleType = GetVehicleType(vehicle)
+    if not vehicleType then return true end -- 種類が取れない場合は確認しない
+    local allowed = GetConfigValue('VehicleTypes.' .. tostring(raceVehicleType) .. '.serverTypes',
+        DEFAULT_SERVER_VEHICLE_TYPES[raceVehicleType] or DEFAULT_SERVER_VEHICLE_TYPES.car)
+    for _, name in ipairs(allowed) do
+        if name == vehicleType then return true end
+    end
+    return false
+end
+
 -- 曲がり角ガイド取得（手動設置分）
 local function GetRaceTurnGuides(raceId)
     return MySQL.query.await([[
@@ -1200,7 +1226,10 @@ RegisterNetEvent('qbx_racing:server:startCountdown', function(sessionId)
             local vehicle = GetVehiclePedIsIn(GetPlayerPed(participant.source), false)
             local reported = ToInteger(info.netId) and NetworkGetEntityFromNetworkId(ToInteger(info.netId)) or 0
             if vehicle ~= 0 and reported == vehicle and allowedClasses[ToInteger(info.class)]
+                and IsServerVehicleAllowed(vehicle, session.race.vehicle_type)
                 and (not startCoords or #(GetEntityCoords(vehicle) - startCoords) <= startRadius) then
+                -- 進捗とゴールはこの車両でしか受け付けない（途中で乗り換えた走りは記録しない）
+                participant.raceVehicle = vehicle
                 table.insert(validParticipants, participant.source)
             end
         end
@@ -1490,6 +1519,9 @@ RegisterNetEvent('qbx_racing:server:updateProgress', function(sessionId, checkpo
     end
     if checkpoint ~= nextCheckpoint or lap ~= nextLap or lap > session.totalLaps then return end
     
+    -- スタート時の車両に乗っていること
+    if participant.raceVehicle and GetServerPlayerVehicle(src) ~= participant.raceVehicle then return end
+    
     -- 通過したチェックポイントの近くにいること（サーバーで見た位置で確認）
     if not IsPlayerNearCheckpoint(src, CourseCheckpointAt(session.race.checkpoints or {}, passedIndex)) then
         print(('^3[CAM Racing]^7 チェックポイント通過を受け付けませんでした（位置が離れています）: %s session=%d CP=%d'):format(
@@ -1514,6 +1546,7 @@ RegisterNetEvent('qbx_racing:server:finishMultiRace', function(sessionId, timeMs
     
     -- 最終周のゴール直前まで順番に通過したか（サーバーが受け取った進捗で確認。ゴールの通過はこの報告自体）
     if finisher.currentLap ~= session.totalLaps or finisher.currentCheckpoint ~= session.lapEndIndex
+        or (finisher.raceVehicle and GetServerPlayerVehicle(src) ~= finisher.raceVehicle)
         or not IsPlayerNearCheckpoint(src, CourseCheckpointAt(session.race.checkpoints or {}, session.lapEndIndex)) then
         print(('^3[CAM Racing]^7 ゴールを受け付けませんでした（チェックポイント未通過）: %s session=%d'):format(
             finisher.driverName, sessionId))
@@ -1844,32 +1877,6 @@ local function SoloCheckpointAt(run, index)
     return CourseCheckpointAt(run.checkpoints, index)
 end
 
--- サーバーから見たプレイヤーの車両（位置が取れない環境では false = 確認しない、乗っていなければ 0）
-local function GetServerPlayerVehicle(src)
-    local ped = GetPlayerPed(src)
-    if not ped or ped == 0 then return false end
-    return GetVehiclePedIsIn(ped, false)
-end
-
--- サーバーで分かる車両の種類（GetVehicleType）がレースの車両タイプに合うか
--- （細かいクラスはサーバーでは取れないので、車のコースを飛行機で走るような違いを防ぐ）
-local DEFAULT_SERVER_VEHICLE_TYPES = {
-    car = {'automobile', 'bike'},
-    heli = {'heli', 'plane'},
-    boat = {'boat', 'submarine'}
-}
-local function IsServerVehicleAllowed(vehicle, raceVehicleType)
-    if not vehicle or vehicle == 0 then return false end
-    local vehicleType = GetVehicleType(vehicle)
-    if not vehicleType then return true end -- 種類が取れない場合は確認しない
-    local allowed = GetConfigValue('VehicleTypes.' .. tostring(raceVehicleType) .. '.serverTypes',
-        DEFAULT_SERVER_VEHICLE_TYPES[raceVehicleType] or DEFAULT_SERVER_VEHICLE_TYPES.car)
-    for _, name in ipairs(allowed) do
-        if name == vehicleType then return true end
-    end
-    return false
-end
-
 -- ソロで、スタート時の車両に乗ったままか（位置が取れない環境では確認しない）
 local function IsInSoloRunVehicle(src, run)
     if not run.vehicle then return true end
@@ -1882,8 +1889,19 @@ RegisterNetEvent('qbx_racing:server:soloRaceStarted', function(raceId, mode)
     local src = source
     local startedAt = GetGameTimer()
     raceId = ToInteger(raceId)
-    soloRuns[src] = nil
     if not raceId then return end
+    
+    -- 走行中のソロを終わらせずに次を始めた場合は、前の走行をリタイア扱いにする
+    -- （通常の画面からは走行中に次のレースを始められないため、リタイアのペナルティを避ける操作になる）
+    local previous = soloRuns[src]
+    soloRuns[src] = nil
+    if previous and not previous.finishing and Progression then
+        local Player = GetPlayer(src)
+        if Player then
+            local ok, err = pcall(Progression.OnSoloRaceRetired, src, Player.PlayerData.citizenid, previous.raceId)
+            if not ok then print('^1[CAM Racing]^7 リタイアの処理に失敗しました: ' .. tostring(err)) end
+        end
+    end
     
     -- コースを読み込む間に届いた通過報告は pending に貯めて、読み込み後に順番に確認する
     -- （スタート直後にスタート地点を通過した報告がすぐ届くため）
