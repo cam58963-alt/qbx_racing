@@ -2054,7 +2054,6 @@ RegisterNetEvent('qbx_racing:server:finishRace', function(raceId, timeMs, vehicl
         PenalizeSoloRun(src, run)
         return
     end
-    run.finishValidated = true
     
     local Player = GetPlayer(src)
     if not Player then return end
@@ -2074,8 +2073,11 @@ RegisterNetEvent('qbx_racing:server:finishRace', function(raceId, timeMs, vehicl
     if serverElapsed < minTime then
         print(('^1[CAM Racing]^7 不正なソロ記録の可能性: %s race=%d 経過=%dms 最短=%dms'):format(
             profile.driver_name, raceId, serverElapsed, minTime))
+        PenalizeSoloRun(src, run)
         return
     end
+    -- ここまでの確認をすべて通ったゴールだけ確定（確定した走行にはリタイアのペナルティをかけない）
+    run.finishValidated = true
     
     -- タイムはサーバーの経過時間と大きくずれていればサーバー側の値を使う
     timeMs = ToInteger(timeMs)
