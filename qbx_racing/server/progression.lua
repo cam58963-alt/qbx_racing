@@ -391,33 +391,65 @@ end
 -- マルチプレイ: 参加者同士のポイントのやり取り
 -- 自分より下の順位の参加者1人につき pointsPerOpponent をもらい、上の順位の参加者には同じだけ渡す
 -- （リタイアはゴールした人より下、リタイア同士は同順位でやり取りなし）
+-- 渡す側の持ち点が足りない分は受け取れない（ポイントの合計は増えも減りもしない）
 -- ===================================
 function Progression.ApplyMultiplayerRanking(session)
     if not RankingEnabled() then return end
     local perOpponent = ToInteger(GetConfigValue('Ranking.multiplayer.pointsPerOpponent', 5)) or 0
     if perOpponent <= 0 then return end
-
+    
     local entrants = {}
     for _, participant in ipairs(session.participants) do
+        local order
         if participant.status == 'finished' then
-            entrants[#entrants + 1] = {participant = participant, order = participant.position or 999}
+            order = participant.position or 999
         elseif participant.status == 'retired' then
-            entrants[#entrants + 1] = {participant = participant, order = math.huge}
+            order = math.huge
+        end
+        if order then
+            local points = MySQL.scalar.await('SELECT points FROM qbx_driver_profiles WHERE citizenid = ?', {participant.citizenid})
+            if points then
+                entrants[#entrants + 1] = {participant = participant, order = order, balance = ToInteger(points) or 0, delta = 0}
+            end
         end
     end
     if #entrants < 2 then return end
-
-    for _, entrant in ipairs(entrants) do
-        local delta = 0
-        for _, other in ipairs(entrants) do
-            if entrant.order < other.order then
-                delta = delta + perOpponent
-            elseif entrant.order > other.order then
-                delta = delta - perOpponent
+    
+    -- 上の順位から順に、下の順位の人から持ち点の範囲で受け取る
+    table.sort(entrants, function(a, b) return a.order < b.order end)
+    for i, winner in ipairs(entrants) do
+        for j = i + 1, #entrants do
+            local loser = entrants[j]
+            if winner.order < loser.order then
+                local amount = math.min(perOpponent, loser.balance)
+                if amount > 0 then
+                    loser.balance = loser.balance - amount
+                    loser.delta = loser.delta - amount
+                    winner.balance = winner.balance + amount
+                    winner.delta = winner.delta + amount
+                end
             end
         end
-        if delta ~= 0 and AddRankingPoints(entrant.participant.citizenid, delta, 'multi', session.raceId) then
-            entrant.participant.pointsDelta = delta
+    end
+    
+    -- 全員分をまとめて保存（途中で失敗して片方だけ動くことがないように）
+    local queries = {}
+    for _, entrant in ipairs(entrants) do
+        if entrant.delta ~= 0 then
+            queries[#queries + 1] = {
+                query = 'UPDATE qbx_driver_profiles SET points = GREATEST(0, points + ?) WHERE citizenid = ?',
+                values = {entrant.delta, entrant.participant.citizenid}
+            }
+            queries[#queries + 1] = {
+                query = 'INSERT INTO qbx_ranking_log (citizenid, delta, reason, race_id) VALUES (?, ?, ?, ?)',
+                values = {entrant.participant.citizenid, entrant.delta, 'multi', session.raceId}
+            }
+        end
+    end
+    if #queries == 0 or not MySQL.transaction.await(queries) then return end
+    for _, entrant in ipairs(entrants) do
+        if entrant.delta ~= 0 then
+            entrant.participant.pointsDelta = entrant.delta
         end
     end
 end

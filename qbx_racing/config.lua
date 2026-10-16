@@ -801,6 +801,7 @@ Config.Security = {
         maxSpeed = 500.0,          -- 最大速度（km/h）
         teleportDetection = true,  -- テレポート検出
         teleportThreshold = 100.0, -- テレポート判定距離（メートル）
+        progressDistanceMargin = 100.0, -- ソロのチェックポイント通過報告: サーバーで見たプレイヤー位置との許容距離（判定半径＋この値、メートル）
         checkInterval = 1000       -- チェック間隔（ミリ秒）
     },
     

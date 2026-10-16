@@ -1799,14 +1799,55 @@ end
 
 -- ソロレース完了処理
 
+-- サーバーで見たプレイヤーの位置がチェックポイントの近くか（OneSync が無く位置が取れない場合は確認しない）
+local function IsPlayerNearCheckpoint(src, cp)
+    if not cp then return false end
+    local ped = GetPlayerPed(src)
+    if not ped or ped == 0 then return true end
+    local coords = GetEntityCoords(ped)
+    if coords.x == 0.0 and coords.y == 0.0 and coords.z == 0.0 then return true end
+    local allowed = (tonumber(cp.radius) or 10.0) + GetConfigValue('Security.antiCheat.progressDistanceMargin', 100.0)
+    return #(coords - vector3(cp.x, cp.y, cp.z)) <= allowed
+end
+
+-- ソロのコース上の位置 index のチェックポイント（周回の index n+1 はスタート地点 = CP1）
+local function SoloCheckpointAt(run, index)
+    return run.checkpoints[index] or run.checkpoints[1]
+end
+
 -- ソロレース開始（GO の瞬間にクライアントから届く）
 -- mode: 'daily' ならデイリーレースとして走る（その日のデイリーで、報酬が残っている場合のみ）
 RegisterNetEvent('qbx_racing:server:soloRaceStarted', function(raceId, mode)
     local src = source
+    local startedAt = GetGameTimer()
     raceId = ToInteger(raceId)
+    soloRuns[src] = nil
     if not raceId then return end
-    local run = {raceId = raceId, startedAt = GetGameTimer(), daily = false}
+    
+    -- コースを読み込む間に届いた通過報告は pending に貯めて、読み込み後に順番に確認する
+    -- （スタート直後にスタート地点を通過した報告がすぐ届くため）
+    local run = {raceId = raceId, startedAt = startedAt, daily = false, pending = {}, checkpoint = 1, lap = 1}
     soloRuns[src] = run
+    
+    -- 通過の確認に使うコース（チェックポイントは順番にしか進めない。ゴールはサーバーが確認した進捗が最終地点の時だけ）
+    local race = MySQL.single.await('SELECT race_type, laps FROM qbx_races WHERE id = ? AND is_active = 1', {raceId})
+    local checkpoints = race and MySQL.query.await([[
+        SELECT x, y, z, radius FROM qbx_race_checkpoints WHERE race_id = ? ORDER BY checkpoint_order ASC
+    ]], {raceId}) or {}
+    if soloRuns[src] ~= run then return end
+    if #checkpoints == 0 then
+        soloRuns[src] = nil
+        return
+    end
+    local isSprint = race.race_type == 'sprint'
+    run.checkpoints = checkpoints
+    run.totalLaps = isSprint and 1 or math.max(1, ToInteger(race.laps) or 1)
+    run.lapEndIndex = isSprint and #checkpoints or #checkpoints + 1
+    local pending = run.pending
+    run.pending = nil
+    for _, report in ipairs(pending) do
+        ApplySoloProgress(src, run, report[1], report[2])
+    end
     
     if mode == 'daily' and Progression then
         local Player = GetPlayer(src)
@@ -1822,6 +1863,38 @@ RegisterNetEvent('qbx_racing:server:soloRaceStarted', function(raceId, mode)
         end
     end
 end)
+
+-- ソロのチェックポイント通過報告（checkpoint は次に向かう位置）
+RegisterNetEvent('qbx_racing:server:soloProgress', function(raceId, checkpoint, lap)
+    local src = source
+    local run = soloRuns[src]
+    checkpoint, lap = ToInteger(checkpoint), ToInteger(lap)
+    if not run or run.raceId ~= ToInteger(raceId) or not checkpoint or not lap then return end
+    if run.pending then
+        -- まだコースを読み込み中
+        if #run.pending < 8 then run.pending[#run.pending + 1] = {checkpoint, lap} end
+        return
+    end
+    ApplySoloProgress(src, run, checkpoint, lap)
+end)
+
+function ApplySoloProgress(src, run, checkpoint, lap)
+    -- 1つずつ順番にしか進めない（周回は index n+1 = スタート地点を通ると次の周の CP2）
+    local passedIndex, nextCheckpoint, nextLap
+    if run.checkpoint < run.lapEndIndex then
+        passedIndex, nextCheckpoint, nextLap = run.checkpoint, run.checkpoint + 1, run.lap
+    else
+        passedIndex, nextCheckpoint, nextLap = run.lapEndIndex, 2, run.lap + 1
+    end
+    if checkpoint ~= nextCheckpoint or lap ~= nextLap or lap > run.totalLaps then return end
+    
+    if not IsPlayerNearCheckpoint(src, SoloCheckpointAt(run, passedIndex)) then
+        print(('^3[CAM Racing]^7 チェックポイント通過を受け付けませんでした（位置が離れています）: src=%d race=%d CP=%d'):format(
+            src, run.raceId, passedIndex))
+        return
+    end
+    run.checkpoint, run.lap = checkpoint, lap
+end
 
 -- ソロレースのリタイア（走行中のみ。ランキングのポイントが下がる）
 RegisterNetEvent('qbx_racing:server:soloRaceRetired', function(raceId)
@@ -1844,6 +1917,18 @@ RegisterNetEvent('qbx_racing:server:finishRace', function(raceId, timeMs, vehicl
     raceId = ToInteger(raceId)
     if not run or run.raceId ~= raceId then return end
     local serverElapsed = GetGameTimer() - run.startedAt
+    
+    -- 最終周のゴール直前まで順番に通過していて、ゴール地点にいること（サーバーが確認した進捗で判断）
+    if run.pending or run.lap ~= run.totalLaps or run.checkpoint ~= run.lapEndIndex
+        or not IsPlayerNearCheckpoint(src, SoloCheckpointAt(run, run.lapEndIndex)) then
+        print(('^3[CAM Racing]^7 ソロのゴールを受け付けませんでした（チェックポイント未通過）: src=%d race=%d'):format(src, raceId))
+        TriggerClientEvent('ox_lib:notify', src, {
+            title = '記録なし',
+            description = 'チェックポイントの通過を確認できなかったため、タイムは記録されませんでした',
+            type = 'error'
+        })
+        return
+    end
     
     local Player = GetPlayer(src)
     if not Player then return end
@@ -2321,8 +2406,11 @@ local SCHEMA_COLUMNS = {
     {'qbx_races', 'ta_rate', "INT NULL"},
     {'qbx_races', 'ta_calib_after_id', "INT DEFAULT 0"},
     {'qbx_races', 'course_length_m', "FLOAT NULL"},
-    -- ランキングのポイント
-    {'qbx_driver_profiles', 'points', "INT DEFAULT 1000 AFTER `total_wins`"}
+    -- ランキングのポイント（既存のプロフィールは設定の初期ポイントで埋める）
+    {'qbx_driver_profiles', 'points', "INT DEFAULT 1000 AFTER `total_wins`", function()
+        MySQL.update.await('UPDATE qbx_driver_profiles SET points = ?',
+            {ToInteger(GetConfigValue('Ranking.startPoints', 1000)) or 1000})
+    end}
 }
 
 -- 1つずつ実行して、失敗したものはログに出して続ける。戻り値: すべて成功したら true
@@ -2350,6 +2438,7 @@ local function EnsureDatabaseSchema()
             ]], {column[1], column[2]})
             if tonumber(exists) == 0 then
                 MySQL.query.await(('ALTER TABLE `%s` ADD COLUMN `%s` %s'):format(column[1], column[2], column[3]))
+                if column[4] then column[4]() end
             end
         end)
     end

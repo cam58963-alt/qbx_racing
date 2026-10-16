@@ -966,8 +966,12 @@ end
 
 -- ソロレース進行処理
 function SoloRaceProgressThread()
+    local raceId = currentRace and currentRace.id
     RunRaceProgress(
-        function() end,
+        function(lap, index)
+            -- サーバーに進捗報告（ゴール時にサーバーが順番どおりに通過したか確認する）
+            TriggerServerEvent('qbx_racing:server:soloProgress', raceId, index, lap)
+        end,
         FinishSoloRace,
         function(reason) RetireSoloRace(reason) end
     )
