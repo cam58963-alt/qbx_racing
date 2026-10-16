@@ -38,7 +38,8 @@ local function GetConfigValue(path, defaultValue)
     
     local current = Config
     for _, key in ipairs(keys) do
-        if current and current[key] then
+        -- false も設定値として扱う（nil のときだけ既定値）
+        if type(current) == 'table' and current[key] ~= nil then
             current = current[key]
         else
             return defaultValue
@@ -54,15 +55,47 @@ local function DebugLog(message)
     end
 end
 
+-- 今乗っている車両の名前（サーバーでは取得できないのでクライアントから送る）
+local function GetCurrentVehicleName()
+    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    if vehicle == 0 then return nil end
+    return GetDisplayNameFromVehicleModel(GetEntityModel(vehicle))
+end
+
+-- サーバーからの問い合わせ: 今乗っている車両のクラス（スタート時の車両チェック用）
+lib.callback.register('qbx_racing:client:getVehicleInfo', function()
+    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    if vehicle == 0 then return nil end
+    return {
+        class = GetVehicleClass(vehicle),
+        netId = NetworkGetNetworkIdFromEntity(vehicle)
+    }
+end)
+
+-- レース中・スタート地点へ移動中・別セッション参加中はマルチプレイに参加できない
+local function CanJoinMultiplayer()
+    if isInSession and currentSession then
+        lib.notify({title = 'エラー', description = '既に別のセッションに参加しています（/racelobby でロビーを開けます）', type = 'error'})
+        return false
+    end
+    if IsRaceBusy and IsRaceBusy() then
+        lib.notify({title = 'エラー', description = 'レース中（またはスタート地点へ移動中）はセッションに参加できません', type = 'error'})
+        return false
+    end
+    return true
+end
+
 -- ===================================
 -- 表示モード（全画面メニュー / タブレットアプリ）
 -- ===================================
 local tabletAppOpen = false
 
 -- タブレットのアプリとして表示するか（タブレットのリソースが起動していなければ全画面メニュー）
+-- （アプリの登録に失敗した場合は全画面メニューを使う。登録結果はサーバーが GlobalState で知らせる）
 local function IsTabletMode()
     return GetConfigValue('UI.mode', 'standalone') == 'tablet'
         and GetResourceState(GetConfigValue('UI.tablet.resource', 'cam_tablet')) == 'started'
+        and GlobalState[GetCurrentResourceName() .. ':tabletApp'] == true
 end
 
 local function GetTabletResource()
@@ -112,6 +145,7 @@ local function CloseMenuUI()
     if isUIOpen then
         isUIOpen = false
         SetNuiFocus(false, false)
+        SendNUIMessage({ action = 'closeUI' })
     end
     
     -- タブレットはレーシングアプリを開いている時だけ閉じる
@@ -124,8 +158,9 @@ local function CloseMenuUI()
 end
 
 -- メニュー画面を開く
+local isOpeningUI = false
 local function OpenMenuUI()
-    if isUIOpen then
+    if isUIOpen or isOpeningUI then
         DebugLog('UI already open, ignoring')
         return
     end
@@ -149,7 +184,9 @@ local function OpenMenuUI()
     
     DebugLog('Opening racing UI...')
     
+    isOpeningUI = true
     lib.callback('qbx_racing:getProfile', false, function(profileData)
+        isOpeningUI = false
         if profileData then
             isUIOpen = true
             SetNuiFocus(true, true)
@@ -159,7 +196,8 @@ local function OpenMenuUI()
                 hasProfile = profileData.hasProfile,
                 driverName = profileData.driverName,
                 isAdmin = profileData.isAdmin,
-                isRacing = IsCurrentlyRacing and IsCurrentlyRacing() or false
+                isRacing = IsRaceBusy and IsRaceBusy() or false,
+                racesPerPage = GetConfigValue('UI.racesPerPage', 12)
             })
             
             DebugLog('UI opened successfully')
@@ -178,6 +216,8 @@ end
 -- セッション作成ダイアログ（スポンサー対応）
 -- ===================================
 function ShowSessionCreateDialog(race)
+    if not CanJoinMultiplayer() then return end
+    
     local bettingEnabled = GetConfigValue('Race.betting.enabled', true)
     local sponsorEnabled = GetConfigValue('Race.betting.sponsor.enabled', true) and 
                           GetConfigValue('Race.betting.sponsor.host.enabled', true)
@@ -296,10 +336,12 @@ function ShowSessionCreateDialog(race)
             countdownDuration = input[2],
             betMode = betMode,
             entryFee = entryFee,
-            sponsorAmount = sponsorAmount
+            sponsorAmount = sponsorAmount,
+            vehicleModel = GetCurrentVehicleName()
         }
         
         lib.callback('qbx_racing:server:createMultiSession', false, function(result)
+            result = result or {success = false}
             if result.success then
                 currentSession = result.sessionId
                 isInSession = true
@@ -311,7 +353,7 @@ function ShowSessionCreateDialog(race)
                         message = string.format([[
 💰 スポンサー付きレース作成完了！
 
-参加費: $%s
+参加費: $%s（あなたも支払い済み）
 スポンサー: $%s（あなたが提供）
 初期賞金プール: $%s
 
@@ -499,7 +541,8 @@ end
 -- ===================================
 -- メインコマンド登録
 -- ===================================
-RegisterCommand('race', function()
+local menuCommand = GetConfigValue('UI.command', 'race')
+RegisterCommand(menuCommand, function()
     -- タブレットモードで commandOpensApp = false の場合はコマンドを使わない
     -- （GetConfigValue は false を既定値に置き換えるため直接参照）
     local tabletConfig = Config.UI and Config.UI.tablet or {}
@@ -512,7 +555,7 @@ end)
 -- キーバインド登録（オプション）
 local keybind = GetConfigValue('UI.keybind', nil)
 if keybind then
-    RegisterKeyMapping('race', 'レースメニューを開く', 'keyboard', keybind)
+    RegisterKeyMapping(menuCommand, 'レースメニューを開く', 'keyboard', keybind)
 end
 
 -- ===================================
@@ -532,12 +575,16 @@ end)
 -- 画面の初期状態（タブレットのアプリが開いた時に取得）
 RegisterNUICallback('getUIState', function(data, cb)
     lib.callback('qbx_racing:getProfile', false, function(profileData)
-        profileData = profileData or {}
+        if not profileData then
+            cb({error = true})
+            return
+        end
         cb({
             hasProfile = profileData.hasProfile or false,
             driverName = profileData.driverName,
             isAdmin = profileData.isAdmin or false,
-            isRacing = IsCurrentlyRacing and IsCurrentlyRacing() or false
+            isRacing = IsRaceBusy and IsRaceBusy() or false,
+            racesPerPage = GetConfigValue('UI.racesPerPage', 12)
         })
     end)
 end)
@@ -651,7 +698,7 @@ RegisterNUICallback('retireRace', function(data, cb)
     if isMultiplayerRace and RetireMultiplayerRace then
         RetireMultiplayerRace()
     elseif RetireSoloRace then
-        RetireSoloRace()
+        RetireSoloRace()  -- スタート地点へ移動中・カウントダウン中の取り消しも含む
     end
     
     -- UIを閉じる
@@ -697,62 +744,9 @@ end)
 -- NUIコールバック: マルチプレイヤー
 -- ===================================
 
--- アクティブセッション一覧取得
-RegisterNUICallback('getActiveSessions', function(data, cb)
-    DebugLog('Fetching active sessions...')
-    lib.callback('qbx_racing:server:getActiveSessions', false, function(sessions)
-        cb(sessions or {})
-        DebugLog('Active sessions fetched: ' .. #(sessions or {}))
-    end)
-end)
-
--- セッション作成
-RegisterNUICallback('createSession', function(data, cb)
-    if not data or not data.raceId then
-        cb({success = false, message = 'レースIDが指定されていません'})
-        return
-    end
-    
-    DebugLog('Creating multiplayer session for race: ' .. data.raceId)
-    
-    lib.callback('qbx_racing:server:createMultiSession', false, function(result)
-        if result and result.success then
-            currentSession = result.sessionId
-            isInSession = true
-            sessionParticipants = result.participants or {}
-            
-            -- UIを閉じてロビー画面へ
-            CloseMenuUI()
-            
-            lib.notify({
-                title = 'セッション作成完了',
-                description = '参加者を募集しています',
-                type = 'success'
-            })
-            
-            ShowSessionLobby(result.sessionId, true, result.race)
-            DebugLog('Session created successfully: ' .. result.sessionId)
-        else
-            lib.notify({
-                title = 'エラー',
-                description = result and result.message or 'セッション作成に失敗しました',
-                type = 'error'
-            })
-            DebugLog('Session creation failed')
-        end
-        
-        cb(result or {success = false})
-    end, data)
-end)
-
--- セッション参加（コンテキストメニュー・NUI 共通）
-function JoinSession(sessionId, race, cb)
-    if isInSession and currentSession then
-        local result = {success = false, message = '既に別のセッションに参加しています（/racelobby でロビーを開けます）'}
-        lib.notify({title = 'エラー', description = result.message, type = 'error'})
-        if cb then cb(result) end
-        return
-    end
+-- セッション参加
+function JoinSession(sessionId, race)
+    if not CanJoinMultiplayer() then return end
     
     DebugLog('Joining session: ' .. tostring(sessionId))
     
@@ -765,9 +759,14 @@ function JoinSession(sessionId, race, cb)
             -- UIを閉じてロビー画面へ
             CloseMenuUI()
             
+            local description = string.format('参加者: %d名', #sessionParticipants)
+            if (result.entryFee or 0) > 0 then
+                description = description .. string.format('\n参加費$%sを支払いました（賞金プール: $%s）',
+                    FormatMoney(result.entryFee), FormatMoney(result.prizePool or 0))
+            end
             lib.notify({
                 title = 'セッション参加完了',
-                description = string.format('参加者: %d名', #sessionParticipants),
+                description = description,
                 type = 'success'
             })
             
@@ -781,19 +780,8 @@ function JoinSession(sessionId, race, cb)
             })
             DebugLog('Session join failed')
         end
-        
-        if cb then cb(result or {success = false}) end
-    end, sessionId)
+    end, sessionId, GetCurrentVehicleName())
 end
-
-RegisterNUICallback('joinSession', function(data, cb)
-    if not data or not data.sessionId then
-        cb({success = false, message = 'セッションIDが指定されていません'})
-        return
-    end
-    
-    JoinSession(data.sessionId, nil, cb)
-end)
 
 -- ===================================
 -- NUIコールバック: レース削除
@@ -1093,7 +1081,7 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
     local keyPlace = GetConfigValue('UI.creationKeybinds.placeCheckpoint', 38)     -- E
     local keyFinish = GetConfigValue('UI.creationKeybinds.finishCreation', 45)      -- R
     local keyCancel = GetConfigValue('UI.creationKeybinds.cancelCreation', 200)     -- ESC
-    local keyDelete = GetConfigValue('UI.creationKeybinds.deleteLastCheckpoint', 177) -- Backspace
+    local keyDelete = GetConfigValue('UI.creationKeybinds.deleteLastCheckpoint', 194) -- Backspace
     
     local turnGuides = {}
     local maxTurnGuides = GetConfigValue('Checkpoint.maxTurnGuides', 50)
@@ -1361,18 +1349,29 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
                 end
             end
             
-            -- ESC: 作成キャンセル
-            if IsControlJustPressed(0, keyCancel) then -- ESC
-                isCreatingRace = false
-                raceCreationData = nil
-                lib.hideTextUI()
-                
-                lib.notify({
-                    title = 'レース作成キャンセル',
-                    description = '作成を中止しました',
-                    type = 'inform'
+            -- ESC: 作成キャンセル（ポーズメニューを開かないようにして、確認してから中止）
+            DisableControlAction(0, keyCancel, true)
+            if IsDisabledControlJustPressed(0, keyCancel) then -- ESC
+                local answer = lib.alertDialog({
+                    header = 'レース作成を中止しますか？',
+                    content = string.format('設置したチェックポイント %d 個は保存されません', #checkpoints),
+                    centered = true,
+                    cancel = true,
+                    labels = { confirm = '中止する', cancel = '作成を続ける' }
                 })
-                DebugLog('Race creation cancelled')
+                
+                if answer == 'confirm' and isCreatingRace then
+                    isCreatingRace = false
+                    raceCreationData = nil
+                    lib.hideTextUI()
+                    
+                    lib.notify({
+                        title = 'レース作成キャンセル',
+                        description = '作成を中止しました',
+                        type = 'inform'
+                    })
+                    DebugLog('Race creation cancelled')
+                end
             end
         end
     end)
@@ -1381,6 +1380,17 @@ end)
 -- ===================================
 -- カウントダウン中の制限処理
 -- ===================================
+local countdownFrozenVehicles = {}
+
+local function UnfreezeCountdownVehicles()
+    for vehicle in pairs(countdownFrozenVehicles) do
+        if DoesEntityExist(vehicle) then
+            FreezeEntityPosition(vehicle, false)
+        end
+    end
+    countdownFrozenVehicles = {}
+end
+
 function StartCountdownRestrictions(sessionId, startPoint, duration)
     isInCountdown = true
     local endTime = GetGameTimer() + (duration * 1000)
@@ -1404,6 +1414,7 @@ function StartCountdownRestrictions(sessionId, startPoint, duration)
             if vehicle ~= 0 then
                 -- 車両完全ロック
                 FreezeEntityPosition(vehicle, true)
+                countdownFrozenVehicles[vehicle] = true
                 SetVehicleEngineOn(vehicle, true, true, false)
                 
                 -- 操作無効化
@@ -1441,11 +1452,7 @@ function StartCountdownRestrictions(sessionId, startPoint, duration)
         
         -- カウントダウン終了：ロック解除
         isInCountdown = false
-        local ped = PlayerPedId()
-        local vehicle = GetVehiclePedIsIn(ped, false)
-        if vehicle ~= 0 then
-            FreezeEntityPosition(vehicle, false)
-        end
+        UnfreezeCountdownVehicles()
         
         DebugLog('Countdown restrictions ended')
     end)
@@ -1549,6 +1556,23 @@ RegisterNetEvent('qbx_racing:client:multiRaceStart', function(data)
     end
 end)
 
+-- 退出に失敗した（サーバーではまだ参加中）→ セッションに戻してロビーを開き直す
+RegisterNetEvent('qbx_racing:client:leaveFailed', function(data)
+    if isInSession and currentSession and currentSession ~= data.sessionId then return end
+
+    currentSession = data.sessionId
+    isInSession = true
+    sessionStatus = 'lobby'
+    sessionParticipants = data.participants or {}
+
+    lib.notify({
+        title = 'エラー',
+        description = '退出の処理に失敗しました。少し待ってからもう一度お試しください',
+        type = 'error'
+    })
+    ShowSessionLobby(data.sessionId, false, nil)
+end)
+
 -- セッションキャンセル通知（タイムアウト・主催者退出など）
 RegisterNetEvent('qbx_racing:client:sessionCancelled', function(data)
     if data.sessionId == currentSession then
@@ -1631,6 +1655,7 @@ AddEventHandler('onResourceStop', function(resourceName)
     if isInCountdown then
         lib.hideTextUI()
     end
+    UnfreezeCountdownVehicles()
     
     -- セッション関連クリーンアップ
     isInSession = false
@@ -1667,8 +1692,7 @@ CreateThread(function()
         -- UIの整合性チェック（ポーズメニュー中にUIが開いていたら閉じる）
         if isUIOpen and IsPauseMenuActive() then
             DebugLog('UI state mismatch detected (pause menu active) - correcting')
-            isUIOpen = false
-            SetNuiFocus(false, false)
+            CloseMenuUI()
         end
         
         -- セッション状態チェック

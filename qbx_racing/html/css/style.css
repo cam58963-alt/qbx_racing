@@ -798,7 +798,12 @@ input[type="text"] {
     top: 20px;
     right: 20px;
     z-index: 10000;
-    pointer-events: auto;
+    pointer-events: none; /* 表示だけ。メニューのボタンのクリックを邪魔しない */
+}
+
+/* メニューを開いている間は HUD を隠す（ヘッダーのボタンに重なるため） */
+body.menu-open .race-hud {
+    display: none !important;
 }
 
 .race-hud-content {
@@ -1203,4 +1208,55 @@ body.in-tablet .modal {
 
 body.in-tablet .modal-content.large {
     max-height: 92vh;
+}
+
+/* ===================================
+   入力・確認ダイアログ / お知らせ
+   =================================== */
+.ask-modal {
+    z-index: 10001; /* レース詳細の上に出す */
+}
+
+.ask-modal .input-group {
+    margin-bottom: 20px;
+}
+
+.btn-secondary {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: #cbd5e1;
+    padding: 14px 24px;
+    border-radius: 12px;
+    cursor: pointer;
+    font-size: 1rem;
+    font-weight: 600;
+    font-family: 'Inter', sans-serif;
+    transition: all 0.25s ease;
+    flex: 1;
+}
+
+.btn-secondary:hover {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.ui-toast {
+    position: fixed;
+    left: 50%;
+    bottom: 32px;
+    transform: translateX(-50%);
+    z-index: 10002;
+    max-width: 90%;
+    padding: 12px 20px;
+    border-radius: 12px;
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #fff;
+    background: rgba(220, 38, 38, 0.95);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    white-space: pre-line;
+    pointer-events: none;
+}
+
+.ui-toast.success {
+    background: rgba(16, 185, 129, 0.95);
 }

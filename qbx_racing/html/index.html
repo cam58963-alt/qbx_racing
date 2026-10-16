@@ -197,6 +197,25 @@
                 </div>
             </div>
         </div>
+
+        <!-- 入力・確認ダイアログ（全画面メニュー用。ゲーム内の画面では prompt / confirm が使えないため） -->
+        <div id="ask-modal" class="modal ask-modal" style="display: none;">
+            <div class="modal-content">
+                <h2 id="ask-title"></h2>
+                <p class="modal-desc" id="ask-message"></p>
+                <div class="input-group" id="ask-input-group">
+                    <i class="fas fa-pen input-icon"></i>
+                    <input type="text" id="ask-input" maxlength="20">
+                </div>
+                <div class="modal-buttons">
+                    <button id="ask-cancel-btn" class="btn-secondary">キャンセル</button>
+                    <button id="ask-ok-btn" class="btn-primary">OK</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- エラーなどのお知らせ -->
+        <div id="ui-toast" class="ui-toast" style="display: none;"></div>
     </div>
 
     <script src="js/script.js"></script>

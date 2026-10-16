@@ -12,6 +12,7 @@
 isRacing = false
 isMultiplayerRace = false
 local currentRace = nil
+local soloCountdownVehicle = 0  -- ソロのカウントダウン中に止めている車両（リソース停止時に解除するため）
 local raceStartTime = 0
 local currentCheckpoint = 1
 local currentLap = 1
@@ -21,6 +22,7 @@ local raceCheckpoints = {}
 local multiplayerSessionId = nil
 local ghostPlayers = {}
 local progressData = {}
+local finishedCount = 0  -- 先にゴールした人数（サーバーから届く）
 
 -- ゴーストモード管理
 local isGhostModeActive = false
@@ -53,13 +55,71 @@ local function GetConfigValue(path, defaultValue)
     
     local current = Config
     for _, key in ipairs(keys) do
-        if current and current[key] then
+        -- false も設定値として扱う（nil のときだけ既定値）
+        if type(current) == 'table' and current[key] ~= nil then
             current = current[key]
         else
             return defaultValue
         end
     end
     return current
+end
+
+-- 前回位置から今回位置までの間にチェックポイントの球を通ったか（高速でもすり抜けない）
+local function PassedThrough(fromPos, toPos, center, radius)
+    if #(toPos - center) <= radius then return true end
+    if not fromPos then return false end
+    
+    local segment = toPos - fromPos
+    local lengthSq = segment.x * segment.x + segment.y * segment.y + segment.z * segment.z
+    -- 止まっている時・テレポートのような大きな移動は線分で判定しない
+    if lengthSq < 0.0001 or lengthSq > 200.0 * 200.0 then return false end
+    
+    local toCenter = center - fromPos
+    local t = (toCenter.x * segment.x + toCenter.y * segment.y + toCenter.z * segment.z) / lengthSq
+    t = math.max(0.0, math.min(1.0, t))
+    return #((fromPos + segment * t) - center) <= radius
+end
+
+-- ===================================
+-- コースの進み方
+-- スプリント: CP1 → … → CPn がゴール
+-- 周回: CP1（スタート）→ … → CPn → CP1 に戻って1周。最終周はスタート地点（CP1）がゴール
+--   currentCheckpoint は「次に通過する番号」。周回では n+1 が「スタート地点に戻る」を表す
+-- ===================================
+local function IsCircuitRace()
+    return currentRace ~= nil and currentRace.race_type ~= 'sprint'
+end
+
+local function GetTotalLaps()
+    return IsCircuitRace() and math.max(1, tonumber(currentRace.laps) or 1) or 1
+end
+
+-- 1周の最後の番号（周回は n+1 = スタート地点に戻る）
+local function LapEndIndex()
+    return IsCircuitRace() and #raceCheckpoints + 1 or #raceCheckpoints
+end
+
+-- 番号 → チェックポイント（n+1 は CP1）
+local function CheckpointAt(index)
+    return raceCheckpoints[index > #raceCheckpoints and 1 or index]
+end
+
+local function IsFinishPosition(lap, index)
+    return lap >= GetTotalLaps() and index == LapEndIndex()
+end
+
+-- 次の（周, 番号）。周の最後の次は、次の周の CP2（CP1 は今通ったスタート地点）
+local function NextPosition(lap, index)
+    if index < LapEndIndex() then
+        return lap, index + 1
+    end
+    return lap + 1, 2
+end
+
+-- ゴール地点のブリップ番号（周回はスタート地点）
+local function GoalBlipIndex()
+    return IsCircuitRace() and 1 or #raceCheckpoints
 end
 
 -- デバッグログ出力
@@ -213,7 +273,7 @@ local function CreateRaceBlips(checkpoints)
         SetBlipSprite(blip, 1)
         SetBlipDisplay(blip, 4)
         SetBlipScale(blip, 0.7)
-        SetBlipColour(blip, i == #checkpoints and 38 or 5) -- ゴールはオレンジ、他は黄色
+        SetBlipColour(blip, i == GoalBlipIndex() and 38 or 5) -- ゴールはオレンジ、他は黄色（周回はスタート地点がゴール）
         SetBlipAsShortRange(blip, true)
         ShowNumberOnBlip(blip, i)
         
@@ -410,13 +470,8 @@ function CleanupDistantGhosts(playerCoords)
             
             -- 範囲外または古いエンティティをリセット
             if distance > maxDistance or (currentTime - data.lastUpdate) > 5000 then
+                -- 衝突は毎フレームの無効化を止めれば戻る（false で呼ぶと逆に永久に無効になる）
                 ResetEntityAlpha(entity)
-                
-                local playerVehicle = GetVehiclePedIsIn(PlayerPedId(), false)
-                if playerVehicle ~= 0 then
-                    SetEntityNoCollisionEntity(playerVehicle, entity, false)
-                    SetEntityNoCollisionEntity(entity, playerVehicle, false)
-                end
                 
                 ghostedEntities[entity] = nil
             end
@@ -512,13 +567,8 @@ function ResetGhostMode()
     local vehicles = GetGamePool('CVehicle')
     for _, vehicle in ipairs(vehicles) do
         if DoesEntityExist(vehicle) then
+            -- 衝突は毎フレームの無効化を止めれば戻る（false で呼ぶと逆に永久に無効になる）
             ResetEntityAlpha(vehicle)
-            
-            local playerVehicle = GetVehiclePedIsIn(PlayerPedId(), false)
-            if playerVehicle ~= 0 and vehicle ~= playerVehicle then
-                SetEntityNoCollisionEntity(playerVehicle, vehicle, false)
-                SetEntityNoCollisionEntity(vehicle, playerVehicle, false)
-            end
         end
     end
     
@@ -584,12 +634,6 @@ function ResetGhostModeOptimized()
     for entity, data in pairs(ghostedEntities) do
         if DoesEntityExist(entity) then
             ResetEntityAlpha(entity)
-            
-            local playerVehicle = GetVehiclePedIsIn(PlayerPedId(), false)
-            if playerVehicle ~= 0 then
-                SetEntityNoCollisionEntity(playerVehicle, entity, false)
-                SetEntityNoCollisionEntity(entity, playerVehicle, false)
-            end
         end
     end
     
@@ -604,10 +648,10 @@ end
 
 -- ソロレース開始
 function StartRace(race)
-    if isRacing then
+    if isRacing or currentRace then
         lib.notify({
             title = 'エラー',
-            description = '既にレース中です',
+            description = '既にレース中（またはスタート地点へ移動中）です',
             type = 'error'
         })
         return
@@ -688,6 +732,7 @@ function StartRace(race)
     local countdownDuration = GetConfigValue('Race.countdownSeconds', 5)
     local startRadius = GetConfigValue('Checkpoint.radius', 10.0) * 2 -- スタート判定は広めに
     
+    local thisRace = race
     CreateThread(function()
         -- スタート地点への接近を待つ（案内表示更新付き）
         if startCp then
@@ -731,10 +776,8 @@ function StartRace(race)
                 
                 Wait(1000)
                 
-                -- レース開始前にキャンセルされた場合
-                if not currentRace then
-                    lib.hideTextUI()
-                    ClearRaceBlips()
+                -- レース開始前に取り消された場合（後片付けは取り消した側で済んでいる）
+                if currentRace ~= thisRace then
                     return
                 end
             end
@@ -751,7 +794,19 @@ function StartRace(race)
             duration = 2000
         })
         
+        -- カウントダウン中は車両を止める（走りながらのスタートで記録が縮まないように）
+        local countdownVehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+        soloCountdownVehicle = countdownVehicle
+        if countdownVehicle ~= 0 then
+            FreezeEntityPosition(countdownVehicle, true)
+        end
+        
         for i = countdownDuration, 1, -1 do
+            if currentRace ~= thisRace then
+                if countdownVehicle ~= 0 then FreezeEntityPosition(countdownVehicle, false) end
+                soloCountdownVehicle = 0
+                return
+            end
             lib.showTextUI(string.format([[%d]], i), {
                 position = "top-center",
                 icon = 'stopwatch',
@@ -784,8 +839,18 @@ function StartRace(race)
         })
         PlaySoundFrontend(-1, 'GO', 'HUD_MINI_GAME_SOUNDSET', true)
         
+        if countdownVehicle ~= 0 then
+            FreezeEntityPosition(countdownVehicle, false)
+        end
+        soloCountdownVehicle = 0
+        if currentRace ~= thisRace then
+            lib.hideTextUI()
+            return
+        end
+        
         isRacing = true
         raceStartTime = GetGameTimer()
+        TriggerServerEvent('qbx_racing:server:soloRaceStarted', thisRace.id)
         
         -- ソロ用ゴーストモード開始（NPC衝突回避）
         StartSoloGhostMode()
@@ -803,75 +868,109 @@ function StartRace(race)
     end)
 end
 
--- ソロレース進行処理
-function SoloRaceProgressThread()
-    local isSprintRace = (currentRace.race_type == 'sprint')
-    local totalLaps = isSprintRace and 1 or (currentRace.laps or 1)
+-- レース進行（ソロ・マルチ共通）
+-- onPassed(lap, index): 通過して位置が進んだ時（マルチはサーバーに報告）
+-- onFinish(): ゴール / onRetire(reason): 車両の乗り換えなどでリタイア
+local function RunRaceProgress(onPassed, onFinish, onRetire)
+    local totalLaps = GetTotalLaps()
+    local swapEnabled = GetConfigValue('Race.vehicleSwapCheck.enabled', true)
+    local swapGraceMs = GetConfigValue('Race.vehicleSwapCheck.graceSeconds', 10) * 1000
+    local raceVehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    local swapDeadline = nil
+    local nextVehicleCheck = 0
     
-    DebugLog('Solo race progress started - Type: ' .. (isSprintRace and 'sprint' or 'circuit') .. ', Laps: ' .. totalLaps)
+    DebugLog('Race progress started - Type: ' .. (IsCircuitRace() and 'circuit' or 'sprint') .. ', Laps: ' .. totalLaps)
     
+    local lastCoords = nil
     while isRacing and currentRace do
         local ped = PlayerPedId()
         local coords = GetEntityCoords(ped)
+        local fromCoords = lastCoords
+        lastCoords = coords
+        local now = GetGameTimer()
         
-        if currentCheckpoint <= #raceCheckpoints then
-            local cp = raceCheckpoints[currentCheckpoint]
-            local cpCoords = vector3(cp.x, cp.y, cp.z)
-            local distance = #(coords - cpCoords)
+        -- 車両の乗り換えチェック（スタート時の車両から降りたまま／別の車両のままなら一定時間後にリタイア）
+        if swapEnabled and now >= nextVehicleCheck then
+            nextVehicleCheck = now + 500
+            local vehicle = GetVehiclePedIsIn(ped, false)
+            if raceVehicle == 0 then raceVehicle = vehicle end
+            if vehicle ~= raceVehicle then
+                if not swapDeadline then
+                    swapDeadline = now + swapGraceMs
+                    lib.notify({
+                        title = '車両チェック',
+                        description = string.format('スタート時の車両に%d秒以内に戻ってください（乗り換えはリタイアになります）', math.floor(swapGraceMs / 1000)),
+                        type = 'error',
+                        duration = 5000
+                    })
+                elseif now >= swapDeadline then
+                    onRetire('スタート時の車両から乗り換えた（または降りたまま）ため、リタイアになりました')
+                    break
+                end
+            else
+                swapDeadline = nil
+            end
+        end
+        
+        local lapEnd = LapEndIndex()
+        if not swapDeadline and currentCheckpoint <= lapEnd then
+            local cp = CheckpointAt(currentCheckpoint)
             
-            if distance <= (cp.radius or 10.0) then
-                currentCheckpoint = currentCheckpoint + 1
-                
-                -- ブリップ更新
-                if raceBlips[currentCheckpoint - 1] then
-                    SetBlipColour(raceBlips[currentCheckpoint - 1], 2) -- 通過済みは緑
+            if PassedThrough(fromCoords, coords, vector3(cp.x, cp.y, cp.z), cp.radius or 10.0) then
+                -- ブリップ更新（通過済みは緑）
+                local blipIndex = currentCheckpoint > #raceCheckpoints and 1 or currentCheckpoint
+                if raceBlips[blipIndex] then
+                    SetBlipColour(raceBlips[blipIndex], 2)
                 end
                 
-                -- ゴール判定
-                if currentCheckpoint > #raceCheckpoints then
-                    if isSprintRace or currentLap >= totalLaps then
-                        -- レース完了
-                        ClearCheckpointEntities()
-                        FinishSoloRace()
-                        break
-                    else
-                        -- 次の周回
-                        currentLap = currentLap + 1
-                        currentCheckpoint = 1
-                        
-                        -- ブリップリセット
-                        for i, blip in ipairs(raceBlips) do
-                            SetBlipColour(blip, i == #raceCheckpoints and 38 or 5)
-                        end
-                        
-                        -- チェックポイント表示更新
-                        UpdateRaceCheckpoints()
-                        
-                        lib.notify({
-                            title = 'ラップ完了',
-                            description = string.format('ラップ %d/%d', currentLap, totalLaps),
-                            type = 'success'
-                        })
-                        
-                        PlaySoundFrontend(-1, 'CHECKPOINT_PERFECT', 'HUD_MINI_GAME_SOUNDSET', true)
+                if IsFinishPosition(currentLap, currentCheckpoint) then
+                    -- ゴール
+                    ClearCheckpointEntities()
+                    onFinish()
+                    break
+                elseif currentCheckpoint == lapEnd then
+                    -- 1周完了 → 次の周（スタート地点は今通ったので CP2 から）
+                    currentLap, currentCheckpoint = NextPosition(currentLap, currentCheckpoint)
+                    onPassed(currentLap, currentCheckpoint)
+                    
+                    for i, blip in ipairs(raceBlips) do
+                        SetBlipColour(blip, i == 1 and 2 or (i == GoalBlipIndex() and 38 or 5))
                     end
+                    UpdateRaceCheckpoints()
+                    
+                    lib.notify({
+                        title = 'ラップ完了',
+                        description = string.format('ラップ %d/%d', currentLap, totalLaps),
+                        type = 'success'
+                    })
+                    PlaySoundFrontend(-1, 'CHECKPOINT_PERFECT', 'HUD_MINI_GAME_SOUNDSET', true)
                 else
-                    -- チェックポイント通過 → 表示更新
+                    -- チェックポイント通過
+                    currentCheckpoint = currentCheckpoint + 1
+                    onPassed(currentLap, currentCheckpoint)
                     UpdateRaceCheckpoints()
                     
                     PlaySoundFrontend(-1, 'CHECKPOINT_PERFECT', 'HUD_MINI_GAME_SOUNDSET', true)
-                    
                     lib.notify({
                         title = 'チェックポイント通過',
-                        description = string.format('CP %d/%d', currentCheckpoint - 1, #raceCheckpoints),
+                        description = string.format('CP %d/%d', math.min(currentCheckpoint - 1, #raceCheckpoints), #raceCheckpoints),
                         type = 'success'
                     })
                 end
             end
         end
         
-        Wait(100)
+        Wait(0) -- 毎フレーム判定（タイムの精度と、高速時のすり抜け防止）
     end
+end
+
+-- ソロレース進行処理
+function SoloRaceProgressThread()
+    RunRaceProgress(
+        function() end,
+        FinishSoloRace,
+        function(reason) RetireSoloRace(reason) end
+    )
 end
 
 -- ソロレースUI
@@ -890,7 +989,7 @@ function SoloRaceUI()
                 visible = true,
                 raceType = raceTypeLabel,
                 time = timeFormatted,
-                checkpoint = math.max(0, currentCheckpoint - 1),
+                checkpoint = math.min(math.max(0, currentCheckpoint - 1), #raceCheckpoints),
                 totalCheckpoints = #raceCheckpoints,
                 lap = currentLap,
                 totalLaps = totalLaps,
@@ -948,14 +1047,35 @@ end
 -- ===================================
 
 -- ソロレースリタイア
-function RetireSoloRace()
+function RetireSoloRace(reason)
+    -- スタート地点へ移動中・カウントダウン中の取り消し（進行スレッドは currentRace の変化を見て止まる）
+    if not isRacing and currentRace and not isMultiplayerRace then
+        currentRace = nil
+        currentCheckpoint = 1
+        currentLap = 1
+        raceCheckpoints = {}
+        ClearRaceBlips()
+        ClearCheckpointEntities()
+        SetWaypointOff()
+        lib.hideTextUI()
+        local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+        if vehicle ~= 0 then FreezeEntityPosition(vehicle, false) end
+        
+        lib.notify({
+            title = 'レース取り消し',
+            description = 'スタート前のレースを取り消しました',
+            type = 'inform'
+        })
+        return
+    end
+    
     if not isRacing then return end
     
     DebugLog('Solo race retired')
     
     lib.notify({
         title = 'リタイア',
-        description = 'レースを放棄しました',
+        description = reason or 'レースを放棄しました',
         type = 'error',
         duration = 5000
     })
@@ -983,20 +1103,30 @@ function RetireSoloRace()
 end
 
 -- マルチプレイヤーレースリタイア
-function RetireMultiplayerRace()
+-- timeUp = true のときはサーバーが制限時間切れでリタイア扱いにした（サーバーへの通知は不要）
+function RetireMultiplayerRace(timeUp, reason)
     if not isRacing or not isMultiplayerRace then return end
     
     DebugLog('Multiplayer race retired - Session: ' .. tostring(multiplayerSessionId))
     
-    -- サーバーにリタイア通知
-    TriggerServerEvent('qbx_racing:server:retireRace', multiplayerSessionId)
-    
-    lib.notify({
-        title = 'リタイア',
-        description = 'レースを放棄しました',
-        type = 'error',
-        duration = 5000
-    })
+    if timeUp then
+        lib.notify({
+            title = 'タイムアップ',
+            description = '制限時間を過ぎたため、レースを終了しました',
+            type = 'error',
+            duration = 8000
+        })
+    else
+        -- サーバーにリタイア通知
+        TriggerServerEvent('qbx_racing:server:retireRace', multiplayerSessionId)
+        
+        lib.notify({
+            title = 'リタイア',
+            description = reason or 'レースを放棄しました',
+            type = 'error',
+            duration = 5000
+        })
+    end
     
     -- NUI HUD非表示
     SendNUIMessage({ action = 'updateRaceHUD', visible = false })
@@ -1037,15 +1167,23 @@ function StartMultiplayerRace(race, sessionId, participants)
     if isRacing then
         lib.notify({
             title = 'エラー',
-            description = '既にレース中です',
+            description = '既にレース中のため、マルチプレイレースには参加できませんでした',
             type = 'error'
         })
+        TriggerServerEvent('qbx_racing:server:retireRace', sessionId)
         return
+    end
+    
+    -- スタート地点へ移動中のソロレースは取り消す
+    if currentRace then
+        RetireSoloRace()
     end
     
     isMultiplayerRace = true
     multiplayerSessionId = sessionId
     ghostPlayers = participants or {}
+    progressData = {}
+    finishedCount = 0
     
     currentRace = race
     raceCheckpoints = race.checkpoints or {}
@@ -1053,11 +1191,7 @@ function StartMultiplayerRace(race, sessionId, participants)
     currentLap = 1
     isRacing = true
     raceStartTime = GetGameTimer()
-    
-    -- レースタイプ判定
-    local isSprintRace = (race.race_type == 'sprint')
-    local totalLaps = isSprintRace and 1 or (race.laps or 1)
-    
+
     DebugLog('Starting multiplayer race - Session: ' .. sessionId .. ', Participants: ' .. #ghostPlayers)
     
     -- ブリップ生成（装飾オブジェクトは不要）
@@ -1078,83 +1212,21 @@ function StartMultiplayerRace(race, sessionId, participants)
     })
     
     -- レース進行スレッド開始
-    CreateThread(function()
-        MultiplayerRaceProgressThread(isSprintRace, totalLaps)
-    end)
+    CreateThread(MultiplayerRaceProgressThread)
     CreateThread(RaceDrawThread)
     CreateThread(MultiplayerRaceUI)
 end
 
 -- マルチプレイヤーレース進行処理
-function MultiplayerRaceProgressThread(isSprintRace, totalLaps)
-    DebugLog('Multiplayer race progress started - Type: ' .. (isSprintRace and 'sprint' or 'circuit') .. ', Laps: ' .. totalLaps)
-    
-    while isRacing and currentRace do
-        local ped = PlayerPedId()
-        local coords = GetEntityCoords(ped)
-        
-        if currentCheckpoint <= #raceCheckpoints then
-            local cp = raceCheckpoints[currentCheckpoint]
-            local cpCoords = vector3(cp.x, cp.y, cp.z)
-            local distance = #(coords - cpCoords)
-            
-            if distance <= (cp.radius or 10.0) then
-                currentCheckpoint = currentCheckpoint + 1
-                
-                -- サーバーに進捗報告
-                TriggerServerEvent('qbx_racing:server:updateProgress', 
-                    multiplayerSessionId, currentCheckpoint, currentLap)
-                
-                -- ブリップ更新
-                if raceBlips[currentCheckpoint - 1] then
-                    SetBlipColour(raceBlips[currentCheckpoint - 1], 2) -- 通過済みは緑
-                end
-                
-                -- ゴール判定
-                if currentCheckpoint > #raceCheckpoints then
-                    if isSprintRace or currentLap >= totalLaps then
-                        -- レース完了
-                        ClearCheckpointEntities()
-                        FinishMultiplayerRace()
-                        break
-                    else
-                        -- 次の周回
-                        currentLap = currentLap + 1
-                        currentCheckpoint = 1
-                        
-                        -- ブリップリセット
-                        for i, blip in ipairs(raceBlips) do
-                            SetBlipColour(blip, i == #raceCheckpoints and 38 or 5)
-                        end
-                        
-                        -- チェックポイント表示更新
-                        UpdateRaceCheckpoints()
-                        
-                        lib.notify({
-                            title = 'ラップ完了',
-                            description = string.format('ラップ %d/%d', currentLap, totalLaps),
-                            type = 'success'
-                        })
-                        
-                        PlaySoundFrontend(-1, 'CHECKPOINT_PERFECT', 'HUD_MINI_GAME_SOUNDSET', true)
-                    end
-                else
-                    -- チェックポイント通過 → 表示更新
-                    UpdateRaceCheckpoints()
-                    
-                    PlaySoundFrontend(-1, 'CHECKPOINT_PERFECT', 'HUD_MINI_GAME_SOUNDSET', true)
-                    
-                    lib.notify({
-                        title = 'チェックポイント通過',
-                        description = string.format('CP %d/%d', currentCheckpoint - 1, #raceCheckpoints),
-                        type = 'success'
-                    })
-                end
-            end
-        end
-        
-        Wait(100)
-    end
+function MultiplayerRaceProgressThread()
+    RunRaceProgress(
+        function(lap, index)
+            -- サーバーに進捗報告（サーバーも順番どおりに進んでいるか確認する）
+            TriggerServerEvent('qbx_racing:server:updateProgress', multiplayerSessionId, index, lap)
+        end,
+        FinishMultiplayerRace,
+        function(reason) RetireMultiplayerRace(false, reason) end
+    )
 end
 
 -- マルチプレイヤーレースUI
@@ -1176,7 +1248,7 @@ function MultiplayerRaceUI()
                 visible = true,
                 raceType = raceTypeLabel,
                 time = timeFormatted,
-                checkpoint = math.max(0, currentCheckpoint - 1),
+                checkpoint = math.min(math.max(0, currentCheckpoint - 1), #raceCheckpoints),
                 totalCheckpoints = #raceCheckpoints,
                 lap = currentLap,
                 totalLaps = totalLaps,
@@ -1196,7 +1268,7 @@ end
 -- 順位計算
 function CalculateMyPosition()
     local myProgress = (currentLap - 1) * #raceCheckpoints + (currentCheckpoint - 1)
-    local position = 1
+    local position = 1 + finishedCount  -- 先にゴールした人より後ろ
     
     for _, data in pairs(progressData) do
         if data.status == 'racing' then
@@ -1212,7 +1284,16 @@ end
 
 -- 進捗更新受信
 RegisterNetEvent('qbx_racing:client:progressUpdate', function(data)
+    if data.sessionId ~= multiplayerSessionId then return end
     progressData = data.progressData or {}
+    finishedCount = data.finishedCount or 0
+end)
+
+-- 制限時間切れ
+RegisterNetEvent('qbx_racing:client:raceTimeUp', function(data)
+    if data.sessionId == multiplayerSessionId then
+        RetireMultiplayerRace(true)
+    end
 end)
 
 -- マルチプレイヤーレース完了
@@ -1323,18 +1404,15 @@ function UpdateRaceCheckpoints()
         iconColor = {r = 255, g = 255, b = 255, a = 255}
     })
 
-    local totalCPs = #raceCheckpoints
+    local lapEnd = LapEndIndex()
 
     -- 現在のチェックポイント
-    if currentCheckpoint <= totalCPs then
-        local cp = raceCheckpoints[currentCheckpoint]
+    if currentCheckpoint <= lapEnd then
+        local cp = CheckpointAt(currentCheckpoint)
         local cpPos = vector3(cp.x, cp.y, cp.z)
-        local isGoal = (currentCheckpoint == totalCPs)
 
-        -- ゴール判定（スプリントの最終CP or 周回の最終ラップ最終CP）
-        local isSprintRace = (currentRace.race_type == 'sprint')
-        local totalLaps = isSprintRace and 1 or (currentRace.laps or 1)
-        local isFinalGoal = isGoal and (isSprintRace or currentLap >= totalLaps)
+        -- ゴール判定（スプリントの最終CP or 周回の最終ラップでスタート地点に戻る時）
+        local isFinalGoal = IsFinishPosition(currentLap, currentCheckpoint)
 
         if isFinalGoal then
             -- ゴールチェックポイント（矢印なし、チェッカーフラッグ）
@@ -1347,9 +1425,8 @@ function UpdateRaceCheckpoints()
             )
         else
             -- 通過チェックポイント（次CPへの矢印表示）
-            local nextIdx = currentCheckpoint + 1
-            if nextIdx > totalCPs then nextIdx = 1 end -- 周回の場合最初に戻る
-            local nextCp = raceCheckpoints[nextIdx]
+            local _, nextIdx = NextPosition(currentLap, currentCheckpoint)
+            local nextCp = CheckpointAt(nextIdx)
             local nextPos = vector3(nextCp.x, nextCp.y, nextCp.z)
 
             CreateCheckpointEntity(
@@ -1363,21 +1440,17 @@ function UpdateRaceCheckpoints()
     end
 
     -- 次のチェックポイント（半透明プレビュー）
-    local previewIdx = currentCheckpoint + 1
-    if previewIdx <= totalCPs then
-        local nextCp = raceCheckpoints[previewIdx]
+    local previewLap, previewIdx = NextPosition(currentLap, currentCheckpoint)
+    if previewLap <= GetTotalLaps() and previewIdx <= lapEnd and not IsFinishPosition(currentLap, currentCheckpoint) then
+        local nextCp = CheckpointAt(previewIdx)
         local nextPos = vector3(nextCp.x, nextCp.y, nextCp.z)
-        local isNextGoal = (previewIdx == totalCPs)
 
         -- 次の次のCP方向（矢印用）
-        local pointToIdx = previewIdx + 1
-        if pointToIdx > totalCPs then pointToIdx = 1 end
-        local pointToCp = raceCheckpoints[pointToIdx]
+        local _, pointToIdx = NextPosition(previewLap, previewIdx)
+        local pointToCp = CheckpointAt(pointToIdx)
         local pointToPos = vector3(pointToCp.x, pointToCp.y, pointToCp.z)
 
-        local isSprintRace = (currentRace.race_type == 'sprint')
-        local totalLaps = isSprintRace and 1 or (currentRace.laps or 1)
-        local isNextFinalGoal = isNextGoal and (isSprintRace or currentLap >= totalLaps)
+        local isNextFinalGoal = IsFinishPosition(previewLap, previewIdx)
 
         if isNextFinalGoal then
             CreateCheckpointEntity(
@@ -1398,54 +1471,50 @@ function UpdateRaceCheckpoints()
         end
     end
 
-    DebugLog('Checkpoints updated: current=' .. currentCheckpoint .. '/' .. totalCPs)
+    DebugLog('Checkpoints updated: current=' .. currentCheckpoint .. '/' .. lapEnd)
 end
 
 -- 自作マーカー描画（次のCP・曲がり角ガイド・予告・ゴール）
 local function DrawCustomRaceMarkers(turns, isCircuit, vehicleType)
     local total = #raceCheckpoints
-    local totalLaps = isCircuit and (currentRace.laps or 1) or 1
+    local totalLaps = GetTotalLaps()
     
-    -- 何周目の何番目かからゴールかどうか判定
-    local function IsFinish(lap, index)
-        return lap >= totalLaps and index == total
-    end
-    
-    -- 次に通過するチェックポイント
-    local cp = raceCheckpoints[currentCheckpoint]
-    local isFinish = IsFinish(currentLap, currentCheckpoint)
+    -- 次に通過するチェックポイント（周回の最終周はスタート地点がゴール）
+    local cp = CheckpointAt(currentCheckpoint)
+    local isFinish = IsFinishPosition(currentLap, currentCheckpoint)
     RaceMarkers.Draw(isFinish and 'finish' or 'checkpoint', cp, nil, vehicleType)
     
-    -- ルート線（自分の位置から次のCPまで。周回レースは次の周の最初のCPへもつなぐ）
+    -- ルート線（自分の位置から次のCPまで。周回レースは次の周の CP2 へもつなぐ）
     local nextCp = nil
     if not isFinish then
-        local nextLap = currentCheckpoint == total and currentLap + 1 or currentLap
+        local nextLap, nextIndex = NextPosition(currentLap, currentCheckpoint)
         if nextLap <= totalLaps then
-            nextCp = raceCheckpoints[currentCheckpoint % total + 1]
+            nextCp = CheckpointAt(nextIndex)
         end
     end
     RaceMarkers.DrawRouteLine(GetEntityCoords(PlayerPedId()), cp, nextCp,
         isFinish and 'finish' or 'checkpoint', vehicleType)
     
-    -- 曲がり角ガイド（このCPに向かっている間、ゴール以外）
-    if not isFinish and turns[currentCheckpoint] then
-        for _, turn in ipairs(turns[currentCheckpoint]) do
+    -- 曲がり角ガイド（このCPに向かっている間、ゴール以外。スタート地点に戻る区間は CP1 のガイド）
+    local turnIndex = currentCheckpoint > total and 1 or currentCheckpoint
+    if not isFinish and turns[turnIndex] then
+        for _, turn in ipairs(turns[turnIndex]) do
             RaceMarkers.DrawTurnGuide(turn, vehicleType)
         end
     end
     
     -- 先のチェックポイントの予告（周回レースは次の周までつなげて表示）
+    local lap, index = currentLap, currentCheckpoint
     for ahead = 1, RaceMarkers.GetPreviewCount() do
-        local position = currentCheckpoint + ahead - 1
-        local lap = currentLap + math.floor(position / total)
-        local index = position % total + 1
+        if IsFinishPosition(lap, index) then break end
+        lap, index = NextPosition(lap, index)
         
         -- 一周しても足りない短いコースでは今のCPまで戻らないように止める
         if lap > totalLaps or ahead >= total then break end
         
-        local previewCp = raceCheckpoints[index]
+        local previewCp = CheckpointAt(index)
         local alpha = RaceMarkers.GetPreviewAlpha(ahead)
-        if IsFinish(lap, index) then
+        if IsFinishPosition(lap, index) then
             RaceMarkers.Draw('finish', previewCp, alpha * 0.5, vehicleType)
         else
             RaceMarkers.Draw('preview', previewCp, alpha, vehicleType)
@@ -1472,7 +1541,7 @@ function RaceDrawThread()
     local turns = RaceMarkers.BuildTurnGuides(raceCheckpoints, isCircuit, currentRace.turnGuides, vehicleType)
     
     while isRacing and currentRace do
-        if currentCheckpoint <= #raceCheckpoints then
+        if currentCheckpoint <= LapEndIndex() then
             DrawCustomRaceMarkers(turns, isCircuit, vehicleType)
         end
         
@@ -1503,6 +1572,12 @@ end
 -- ===================================
 AddEventHandler('onResourceStop', function(resourceName)
     if resourceName ~= GetCurrentResourceName() then return end
+    
+    -- ソロのカウントダウン中に止めた車両を解除（カウントダウン中は isRacing が false のため個別に）
+    if soloCountdownVehicle ~= 0 and DoesEntityExist(soloCountdownVehicle) then
+        FreezeEntityPosition(soloCountdownVehicle, false)
+    end
+    soloCountdownVehicle = 0
     
     -- レース中の場合はクリーンアップ
     if isRacing then
@@ -1547,6 +1622,11 @@ end
 
 function IsCurrentlyMultiplayer()
     return isMultiplayerRace
+end
+
+-- レース中、またはスタート地点へ移動中・カウントダウン中
+function IsRaceBusy()
+    return isRacing or currentRace ~= nil
 end
 
 -- ===================================
