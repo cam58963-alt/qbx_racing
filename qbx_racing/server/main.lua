@@ -1672,19 +1672,21 @@ function CheckSessionComplete(sessionId)
     end
     -- ランキング: 参加者同士のポイントのやり取りも同じトランザクションで保存する
     -- （結果が保存できなかったレースはポイントも動かない）
-    local rankingDeltas = {}
+    local rankingRefs = {}
     if Progression then
-        local ok, queries, deltas = pcall(Progression.BuildMultiplayerRanking, session)
+        local ok, queries, refs = pcall(Progression.BuildMultiplayerRanking, session)
         if ok then
             for _, query in ipairs(queries or {}) do table.insert(extraQueries, query) end
-            rankingDeltas = deltas or {}
+            rankingRefs = refs or {}
         else
             print('^1[CAM Racing]^7 ランキングの計算に失敗しました: ' .. tostring(queries))
         end
     end
     if RecordPayouts(sessionId, payouts, extraQueries) then
-        for participant, delta in pairs(rankingDeltas) do
-            participant.pointsDelta = delta
+        -- 表示するポイント変動は、実際に保存された値（履歴）から読む
+        for participant, ref in pairs(rankingRefs) do
+            local ok, delta = pcall(Progression.ReadRankingDelta, ref)
+            participant.pointsDelta = ok and delta or nil
         end
         SettlePayouts(sessionId, SessionSources(session))
         PayHouseCut(session)
@@ -1877,6 +1879,21 @@ local function SoloCheckpointAt(run, index)
     return CourseCheckpointAt(run.checkpoints, index)
 end
 
+-- ソロの走行をリタイア扱いにしてランキングのペナルティを適用する
+-- （1つの走行につき1回だけ。ゴールが確定した走行には適用しない）
+local function PenalizeSoloRun(src, run)
+    if not run or run.penalized or run.finishValidated or not Progression then return end
+    local citizenid = run.citizenid
+    if not citizenid then
+        local Player = GetPlayer(src)
+        citizenid = Player and Player.PlayerData.citizenid
+    end
+    if not citizenid then return end
+    run.penalized = true
+    local ok, err = pcall(Progression.OnSoloRaceRetired, src, citizenid, run.raceId)
+    if not ok then print('^1[CAM Racing]^7 リタイアの処理に失敗しました: ' .. tostring(err)) end
+end
+
 -- ソロで、スタート時の車両に乗ったままか（位置が取れない環境では確認しない）
 local function IsInSoloRunVehicle(src, run)
     if not run.vehicle then return true end
@@ -1895,13 +1912,7 @@ RegisterNetEvent('qbx_racing:server:soloRaceStarted', function(raceId, mode)
     -- （通常の画面からは走行中に次のレースを始められないため、リタイアのペナルティを避ける操作になる）
     local previous = soloRuns[src]
     soloRuns[src] = nil
-    if previous and not previous.finishing and Progression then
-        local Player = GetPlayer(src)
-        if Player then
-            local ok, err = pcall(Progression.OnSoloRaceRetired, src, Player.PlayerData.citizenid, previous.raceId)
-            if not ok then print('^1[CAM Racing]^7 リタイアの処理に失敗しました: ' .. tostring(err)) end
-        end
-    end
+    PenalizeSoloRun(src, previous)
     
     -- コースを読み込む間に届いた通過報告は pending に貯めて、読み込み後に順番に確認する
     -- （スタート直後にスタート地点を通過した報告がすぐ届くため）
@@ -2011,12 +2022,7 @@ RegisterNetEvent('qbx_racing:server:soloRaceRetired', function(raceId)
     local run = soloRuns[src]
     if not run or run.raceId ~= ToInteger(raceId) then return end
     soloRuns[src] = nil
-    
-    local Player = GetPlayer(src)
-    if Player and Progression then
-        local ok, err = pcall(Progression.OnSoloRaceRetired, src, Player.PlayerData.citizenid, run.raceId)
-        if not ok then print('^1[CAM Racing]^7 リタイアの処理に失敗しました: ' .. tostring(err)) end
-    end
+    PenalizeSoloRun(src, run)
 end)
 
 RegisterNetEvent('qbx_racing:server:finishRace', function(raceId, timeMs, vehicleModel)
@@ -2045,13 +2051,10 @@ RegisterNetEvent('qbx_racing:server:finishRace', function(raceId, timeMs, vehicl
             type = 'error'
         })
         -- 受け付けられなかったゴールはリタイア扱い（途中で投げ出してペナルティを避けられないように）
-        local Player = GetPlayer(src)
-        if Player and Progression then
-            local ok, err = pcall(Progression.OnSoloRaceRetired, src, Player.PlayerData.citizenid, run.raceId)
-            if not ok then print('^1[CAM Racing]^7 リタイアの処理に失敗しました: ' .. tostring(err)) end
-        end
+        PenalizeSoloRun(src, run)
         return
     end
+    run.finishValidated = true
     
     local Player = GetPlayer(src)
     if not Player then return end
@@ -2705,12 +2708,10 @@ AddEventHandler('playerDropped', function(reason)
     busyPlayers[src] = nil
     
     -- ソロの走行中に切断したらリタイア扱い（切断して投げ出すとペナルティを避けられないように）
+    -- （ゴールの確認中に切断した場合も、ゴールが確定していなければリタイア扱い）
     local droppedRun = soloRuns[src]
     soloRuns[src] = nil
-    if droppedRun and not droppedRun.finishing and droppedRun.citizenid and Progression then
-        local ok, err = pcall(Progression.OnSoloRaceRetired, src, droppedRun.citizenid, droppedRun.raceId)
-        if not ok then print('^1[CAM Racing]^7 切断時のリタイア処理に失敗しました: ' .. tostring(err)) end
-    end
+    PenalizeSoloRun(src, droppedRun)
     
     local sessionIds = {}
     for sessionId in pairs(ActiveSessions) do

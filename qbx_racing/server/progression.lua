@@ -268,8 +268,10 @@ local function ReplaceInactiveDailySlots(day)
     end
     if #stale == 0 then return end
     
+    -- 代わりの候補が無い枠は消さずに残す（次に読む時にまた選び直す。削除済みのレースは一覧には出ない）
     local candidates = DailyCandidates(selected)
     for _, slot in ipairs(stale) do
+        if #candidates == 0 then break end
         MySQL.update.await('DELETE FROM qbx_daily_races WHERE day = ? AND slot = ?', {day, slot})
         FillDailySlot(day, slot, candidates)
     end
@@ -479,7 +481,7 @@ end
 -- （リタイアはゴールした人より下、リタイア同士は同順位でやり取りなし）
 -- 渡す側の持ち点が足りない分は受け取れない（ポイントの合計は増えも減りもしない）
 -- ===================================
--- 戻り値: 保存するクエリ（セッション終了のトランザクションに含める）, 参加者 → ポイント変動
+-- 戻り値: 保存するクエリ（セッション終了のトランザクションに含める）, 参加者 → 履歴の ref（保存後に実際の変動を読むため）
 function Progression.BuildMultiplayerRanking(session)
     if not RankingEnabled() then return {}, {} end
     local perOpponent = ToInteger(GetConfigValue('Ranking.multiplayer.pointsPerOpponent', 5)) or 0
@@ -494,35 +496,20 @@ function Progression.BuildMultiplayerRanking(session)
             order = math.huge
         end
         if order then
-            local points = MySQL.scalar.await('SELECT points FROM qbx_driver_profiles WHERE citizenid = ?', {participant.citizenid})
-            if points then
-                entrants[#entrants + 1] = {participant = participant, order = order, balance = ToInteger(points) or 0, delta = 0}
+            -- プロフィールのある参加者だけ
+            if MySQL.scalar.await('SELECT 1 FROM qbx_driver_profiles WHERE citizenid = ?', {participant.citizenid}) then
+                entrants[#entrants + 1] = {participant = participant, order = order}
             end
         end
     end
     if #entrants < 2 then return {}, {} end
     
-    -- 上の順位から順に、下の順位の人から持ち点の範囲で受け取る
     table.sort(entrants, function(a, b) return a.order < b.order end)
-    for i, winner in ipairs(entrants) do
-        for j = i + 1, #entrants do
-            local loser = entrants[j]
-            if winner.order < loser.order then
-                local amount = math.min(perOpponent, loser.balance)
-                if amount > 0 then
-                    loser.balance = loser.balance - amount
-                    loser.delta = loser.delta - amount
-                    winner.balance = winner.balance + amount
-                    winner.delta = winner.delta + amount
-                end
-            end
-        end
-    end
     
-    -- 保存は「渡す側の持ち点をロックして読み、その範囲で渡す」をトランザクションの中で1組ずつ行う
-    -- （計算後に別の処理で持ち点が減っていても、無いポイントを渡して増やさないように）
-    -- 上の計算は表示用の見込み（同時に持ち点が変わらなければ保存される値と同じ）
-    local queries, deltas = {}, {}
+    -- 上の順位から順に、下の順位の人から持ち点の範囲で受け取る
+    -- 「渡す側の持ち点をロックして読み、その範囲で渡す」をトランザクションの中で1組ずつ行う
+    -- （同時に別の処理で持ち点が減っていても、無いポイントを渡して増やさないように）
+    local queries, refs = {}, {}
     local function add(sql, values)
         queries[#queries + 1] = {query = sql, values = values or {}}
     end
@@ -547,14 +534,20 @@ function Progression.BuildMultiplayerRanking(session)
         end
     end
     for i, entrant in ipairs(entrants) do
-        add(([[INSERT INTO qbx_ranking_log (citizenid, delta, reason, race_id)
-               SELECT ?, @qbx_rk_%d, 'multi', ? FROM DUAL WHERE @qbx_rk_%d <> 0]]):format(i, i),
-            {entrant.participant.citizenid, session.raceId})
-        if entrant.delta ~= 0 then
-            deltas[entrant.participant] = entrant.delta
-        end
+        local ref = ('multi:%s:%s:%d'):format(tostring(session.id), entrant.participant.citizenid, math.random(1, 1000000000))
+        add(([[INSERT INTO qbx_ranking_log (citizenid, delta, reason, race_id, ref)
+               SELECT ?, @qbx_rk_%d, 'multi', ?, ? FROM DUAL WHERE @qbx_rk_%d <> 0]]):format(i, i),
+            {entrant.participant.citizenid, session.raceId, ref})
+        refs[entrant.participant] = ref
     end
-    return queries, deltas
+    return queries, refs
+end
+
+-- 保存されたポイント変動（ref で記録した履歴）。変動なしは nil
+function Progression.ReadRankingDelta(ref)
+    local delta = ToInteger(MySQL.scalar.await('SELECT delta FROM qbx_ranking_log WHERE ref = ?', {ref}))
+    if not delta or delta == 0 then return nil end
+    return delta
 end
 
 -- ===================================
