@@ -197,13 +197,21 @@ local function CalculateMinRaceTimeMs(race)
     return math.floor(total / maxSpeed * 1000)
 end
 
--- サーバーで見たプレイヤーの位置がチェックポイントの近くか（OneSync が無く位置が取れない場合は確認しない）
-local function IsPlayerNearCheckpoint(src, cp)
-    if not cp then return false end
+-- サーバーで見たプレイヤーの位置（OneSync が無いなどで取れない場合は false）
+local function GetServerPlayerCoords(src)
     local ped = GetPlayerPed(src)
-    if not ped or ped == 0 then return true end
+    if not ped or ped == 0 then return false end
     local coords = GetEntityCoords(ped)
-    if coords.x == 0.0 and coords.y == 0.0 and coords.z == 0.0 then return true end
+    if coords.x == 0.0 and coords.y == 0.0 and coords.z == 0.0 then return false end
+    return coords
+end
+
+-- サーバーで見たプレイヤーの位置がチェックポイントの近くか（位置が取れない場合は確認しない）
+-- coords: 報告が届いた時点の位置（省略すると今の位置）
+local function IsPlayerNearCheckpoint(src, cp, coords)
+    if not cp then return false end
+    if coords == nil then coords = GetServerPlayerCoords(src) end
+    if not coords then return true end
     local allowed = (tonumber(cp.radius) or 10.0) + GetConfigValue('Security.antiCheat.progressDistanceMargin', 100.0)
     return #(coords - vector3(cp.x, cp.y, cp.z)) <= allowed
 end
@@ -1867,7 +1875,7 @@ RegisterNetEvent('qbx_racing:server:soloRaceStarted', function(raceId, mode)
     local pending = run.pending
     run.pending = nil
     for _, report in ipairs(pending) do
-        ApplySoloProgress(src, run, report[1], report[2])
+        ApplySoloProgress(src, run, report[1], report[2], report[3])
     end
     
     if mode == 'daily' and Progression then
@@ -1893,13 +1901,14 @@ RegisterNetEvent('qbx_racing:server:soloProgress', function(raceId, checkpoint, 
     if not run or run.raceId ~= ToInteger(raceId) or not checkpoint or not lap then return end
     if run.pending then
         -- まだコースを読み込み中
-        if #run.pending < 8 then run.pending[#run.pending + 1] = {checkpoint, lap} end
+        -- 位置は報告が届いた時点のものを使う（読み込み後の位置で確認すると先に進んだぶん離れてしまう）
+        if #run.pending < 8 then run.pending[#run.pending + 1] = {checkpoint, lap, GetServerPlayerCoords(src)} end
         return
     end
     ApplySoloProgress(src, run, checkpoint, lap)
 end)
 
-function ApplySoloProgress(src, run, checkpoint, lap)
+function ApplySoloProgress(src, run, checkpoint, lap, coords)
     -- 1つずつ順番にしか進めない（周回は index n+1 = スタート地点を通ると次の周の CP2）
     local passedIndex, nextCheckpoint, nextLap
     if run.checkpoint < run.lapEndIndex then
@@ -1909,7 +1918,7 @@ function ApplySoloProgress(src, run, checkpoint, lap)
     end
     if checkpoint ~= nextCheckpoint or lap ~= nextLap or lap > run.totalLaps then return end
     
-    if not IsPlayerNearCheckpoint(src, SoloCheckpointAt(run, passedIndex)) then
+    if not IsPlayerNearCheckpoint(src, SoloCheckpointAt(run, passedIndex), coords) then
         print(('^3[CAM Racing]^7 チェックポイント通過を受け付けませんでした（位置が離れています）: src=%d race=%d CP=%d'):format(
             src, run.raceId, passedIndex))
         return
@@ -1998,7 +2007,10 @@ RegisterNetEvent('qbx_racing:server:finishRace', function(raceId, timeMs, vehicl
     if not timeSaved then
         lines[#lines + 1] = '⚠️ 記録を保存できませんでした'
     elseif Progression then
-        local ok, result = pcall(Progression.OnSoloRaceFinished, src, Player.PlayerData.citizenid, race, timeMs, run.daily)
+        -- 報酬・ランキングの判定はサーバーで測った経過時間より速くならない値で行う
+        -- （記録するタイムはクライアントの値でも、報酬の判定で数秒縮められないように）
+        local judgedTimeMs = math.max(timeMs, serverElapsed)
+        local ok, result = pcall(Progression.OnSoloRaceFinished, src, Player.PlayerData.citizenid, race, judgedTimeMs, run.daily)
         if ok then
             for _, line in ipairs(result or {}) do lines[#lines + 1] = line end
         else
