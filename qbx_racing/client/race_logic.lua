@@ -709,12 +709,12 @@ function StartRace(race)
         
         -- 案内UI表示
         lib.showTextUI(string.format(
-            '🏁 <b>レース準備中</b>: %s<br><br>'
-            .. '📍 スタート地点まで: <b>%.0fm</b><br>'
-            .. '🚗 車両タイプ: <b>%s</b><br>'
-            .. '🏎️ タイプ: <b>%s</b>（%d周）<br>'
-            .. '📍 CP: <b>%d個</b><br><br>'
-            .. '➡️ スタート地点に向かってください！<br>'
+            '🏁 **レース準備中**: %s  \n  \n'
+            .. '📍 スタート地点まで: **%.0fm**  \n'
+            .. '🚗 車両タイプ: **%s**  \n'
+            .. '🏎️ タイプ: **%s**（%d周）  \n'
+            .. '📍 CP: **%d個**  \n  \n'
+            .. '➡️ スタート地点に向かってください！  \n'
             .. '到着後すぐにカウントダウンが始まります',
             race.name, distToStart, vehicleLabel, raceTypeLabel, totalLaps, #raceCheckpoints), {
             position = "left-center",
@@ -756,12 +756,12 @@ function StartRace(race)
                 local totalLaps = currentRace.race_type == 'sprint' and 1 or (currentRace.laps or 1)
                 
                 lib.showTextUI(string.format(
-                    '🏁 <b>レース準備中</b>: %s<br><br>'
-                    .. '📍 スタート地点まで: <b>%.0fm</b><br>'
-                    .. '🚗 車両タイプ: <b>%s</b><br>'
-                    .. '🏎️ タイプ: <b>%s</b>（%d周）<br>'
-                    .. '📍 CP: <b>%d個</b><br><br>'
-                    .. '➡️ スタート地点に向かってください！<br>'
+                    '🏁 **レース準備中**: %s  \n  \n'
+                    .. '📍 スタート地点まで: **%.0fm**  \n'
+                    .. '🚗 車両タイプ: **%s**  \n'
+                    .. '🏎️ タイプ: **%s**（%d周）  \n'
+                    .. '📍 CP: **%d個**  \n  \n'
+                    .. '➡️ スタート地点に向かってください！  \n'
                     .. '到着後すぐにカウントダウンが始まります',
                     currentRace.name, dist, vehicleLabel, raceTypeLabel, totalLaps, #raceCheckpoints), {
                     position = "left-center",

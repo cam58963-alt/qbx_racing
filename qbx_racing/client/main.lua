@@ -1099,15 +1099,15 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
     -- 操作ガイドを左側に表示
     local function ShowCreationGuide()
         lib.showTextUI(
-            '🏁 <b>レース作成モード</b>: ' .. raceCreationData.name .. '<br><br>'
-            .. '[E] チェックポイント設置<br>'
-            .. '[R] 作成完了（最低 ' .. minCheckpoints .. '個）<br>'
-            .. '[ESC] 作成キャンセル<br>'
-            .. '[Backspace] 最後のポイント削除<br><br>'
-            .. '[←] [→] 今いる場所に曲がり角ガイド設置（左・右）<br>'
-            .. '[↑] [↓] 最後のガイドを横に長く・短く<br>'
-            .. '[Delete] 最後のガイド削除<br><br>'
-            .. '設置済み: <b>' .. #checkpoints .. '個</b> / ガイド: <b>' .. #turnGuides .. '個</b>',
+            '🏁 **レース作成モード**: ' .. raceCreationData.name .. '  \n  \n'
+            .. '[E] チェックポイント設置  \n'
+            .. '[R] 作成完了（最低 ' .. minCheckpoints .. '個）  \n'
+            .. '[ESC] 作成キャンセル  \n'
+            .. '[Backspace] 最後のポイント削除  \n  \n'
+            .. '[←] [→] 今いる場所に曲がり角ガイド設置（左・右）  \n'
+            .. '[↑] [↓] 最後のガイドを横に長く・短く  \n'
+            .. '[Delete] 最後のガイド削除  \n  \n'
+            .. '設置済み: **' .. #checkpoints .. '個** / ガイド: **' .. #turnGuides .. '個**',
         {
             position = "left-center",
             icon = 'map-marked-alt',
@@ -1496,7 +1496,7 @@ RegisterNetEvent('qbx_racing:client:countdownTick', function(data)
     local countdown = data.countdown
     
     lib.showTextUI(
-        '⏱️ <b>' .. countdown .. '</b>',
+        '⏱️ **' .. countdown .. '**',
     {
         position = "top-center",
         icon = 'stopwatch',
@@ -1522,7 +1522,7 @@ RegisterNetEvent('qbx_racing:client:multiRaceStart', function(data)
     lib.hideTextUI()
     
     lib.showTextUI(
-        '🏁 <b>GO!</b>',
+        '🏁 **GO!**',
     {
         position = "top-center",
         icon = 'flag-checkered',
