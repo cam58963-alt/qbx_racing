@@ -85,19 +85,25 @@ local function CalculateTimeAttackReward(lengthM, gates, targetMs, vehicleType)
 end
 
 -- ランキングのポイントを増減する（0 未満にはならない）
+-- 戻り値: 実際に変わったポイント（持ち点が足りず減らせなかった分は含まない。変化なし・失敗は 0）
 local function AddRankingPoints(citizenid, delta, reason, raceId)
     delta = ToInteger(delta)
-    if not citizenid or not delta or delta == 0 then return false end
-    return MySQL.transaction.await({
+    if not citizenid or not delta or delta == 0 then return 0 end
+    local current = MySQL.scalar.await('SELECT points FROM qbx_driver_profiles WHERE citizenid = ?', {citizenid})
+    if current == nil then return 0 end
+    local applied = math.max(delta, -math.max(0, ToInteger(current) or 0))
+    if applied == 0 then return 0 end
+    local ok = MySQL.transaction.await({
         {
-            query = 'UPDATE qbx_driver_profiles SET points = GREATEST(0, COALESCE(points, ?) + ?) WHERE citizenid = ?',
-            values = {ToInteger(GetConfigValue('Ranking.startPoints', 1000)) or 1000, delta, citizenid}
+            query = 'UPDATE qbx_driver_profiles SET points = GREATEST(0, points + ?) WHERE citizenid = ?',
+            values = {applied, citizenid}
         },
         {
             query = 'INSERT INTO qbx_ranking_log (citizenid, delta, reason, race_id) VALUES (?, ?, ?, ?)',
-            values = {citizenid, delta, reason, raceId}
+            values = {citizenid, applied, reason, raceId}
         }
-    }) and true or false
+    })
+    return ok and applied or 0
 end
 
 -- 今日すでに同じ理由で同じレースのポイントをもらったか（ソロの稼ぎすぎ防止）
@@ -179,45 +185,76 @@ local function LoadDailyRows(day)
     ]], {day}) or {}
 end
 
--- 目標タイムが決まっているレースからランダムに選ぶ（目標タイムと報酬は選んだ時点の値で固定）
-local function PickDailyRaces(day)
-    local candidates = MySQL.query.await([[
+-- デイリーに選べるレース（目標タイムが決まっているもの。excluded の race_id は除く）
+local function DailyCandidates(excluded)
+    local candidates = {}
+    for _, race in ipairs(MySQL.query.await([[
         SELECT id, target_time_ms, ta_reward FROM qbx_races
         WHERE is_active = 1 AND target_time_ms IS NOT NULL AND ta_reward IS NOT NULL
-    ]]) or {}
-    if #candidates == 0 then return end
+    ]]) or {}) do
+        if not excluded[race.id] then candidates[#candidates + 1] = race end
+    end
+    return candidates
+end
 
+-- 候補からランダムに1つ取り出してその枠に入れる（目標タイムと報酬は選んだ時点の値で固定）
+local function FillDailySlot(day, slot, candidates)
+    if #candidates == 0 then return end
+    local race = table.remove(candidates, math.random(1, #candidates))
+    local multiplier = tonumber(GetConfigValue('Daily.rewardMultiplier', 1.0)) or 1.0
+    MySQL.insert.await([[
+        INSERT IGNORE INTO qbx_daily_races (day, slot, race_id, target_time_ms, reward) VALUES (?, ?, ?, ?, ?)
+    ]], {day, slot, race.id, race.target_time_ms, math.floor(race.ta_reward * multiplier)})
+end
+
+-- その日のレースをランダムに選ぶ
+local function PickDailyRaces(day)
+    local candidates = DailyCandidates({})
+    if #candidates == 0 then return end
     local minCount = math.max(1, ToInteger(GetConfigValue('Daily.raceCount.min', 1)) or 1)
     local maxCount = math.max(minCount, ToInteger(GetConfigValue('Daily.raceCount.max', 2)) or 2)
     local count = math.min(#candidates, math.random(minCount, maxCount))
-    local multiplier = tonumber(GetConfigValue('Daily.rewardMultiplier', 1.0)) or 1.0
-
     for slot = 1, count do
-        local index = math.random(slot, #candidates)
-        candidates[slot], candidates[index] = candidates[index], candidates[slot]
-        local race = candidates[slot]
-        MySQL.insert.await([[
-            INSERT IGNORE INTO qbx_daily_races (day, slot, race_id, target_time_ms, reward) VALUES (?, ?, ?, ?, ?)
-        ]], {day, slot, race.id, race.target_time_ms, math.floor(race.ta_reward * multiplier)})
+        FillDailySlot(day, slot, candidates)
     end
 end
 
--- 今日のデイリーレース（まだ選ばれていなければここで選ぶ）
+-- 今日選ばれたレースが削除されていたら、その枠を別のレースで選び直す
+local function ReplaceInactiveDailySlots(day)
+    local slots = MySQL.query.await([[
+        SELECT d.slot, d.race_id, (r.id IS NOT NULL AND r.is_active = 1) AS active
+        FROM qbx_daily_races d LEFT JOIN qbx_races r ON r.id = d.race_id
+        WHERE d.day = ?
+    ]], {day}) or {}
+    local selected, stale = {}, {}
+    for _, row in ipairs(slots) do
+        selected[row.race_id] = true
+        if row.active ~= 1 and row.active ~= true then stale[#stale + 1] = row.slot end
+    end
+    if #stale == 0 then return end
+    
+    local candidates = DailyCandidates(selected)
+    for _, slot in ipairs(stale) do
+        MySQL.update.await('DELETE FROM qbx_daily_races WHERE day = ? AND slot = ?', {day, slot})
+        FillDailySlot(day, slot, candidates)
+    end
+end
+
+-- 今日のデイリーレース（まだ選ばれていなければここで選ぶ。削除されたレースの枠は選び直す）
 local dailyPicking = false
 function Progression.GetDailyRaces()
     local day = Today()
     if not DailyEnabled() then return {}, day end
-
-    local rows = LoadDailyRows(day)
-    if #rows > 0 then return rows, day end
-
+    
     -- 同時に選ばないように1つずつ（別のリクエストが選んでいる間は待つ）
     while dailyPicking do Wait(50) end
-    rows = LoadDailyRows(day)
-    if #rows > 0 then return rows, day end
-
     dailyPicking = true
-    local ok, err = pcall(PickDailyRaces, day)
+    local ok, err = pcall(function()
+        ReplaceInactiveDailySlots(day)
+        if #LoadDailyRows(day) == 0 then
+            PickDailyRaces(day)
+        end
+    end)
     dailyPicking = false
     if not ok then
         print('^1[CAM Racing]^7 デイリーレースを選べませんでした: ' .. tostring(err))
@@ -368,16 +405,14 @@ function Progression.OnSoloRaceFinished(src, citizenid, race, timeMs, isDaily)
     if RankingEnabled() then
         local delta = 0
         local finishPoints = ToInteger(GetConfigValue('Ranking.solo.finish', 5)) or 0
-        if finishPoints ~= 0 and not RankingGivenToday(citizenid, 'solo-finish', race.id)
-            and AddRankingPoints(citizenid, finishPoints, 'solo-finish', race.id) then
-            delta = delta + finishPoints
+        if finishPoints ~= 0 and not RankingGivenToday(citizenid, 'solo-finish', race.id) then
+            delta = delta + AddRankingPoints(citizenid, finishPoints, 'solo-finish', race.id)
         end
         local beatTarget = target or (daily and daily.target_time_ms)
         local targetPoints = ToInteger(GetConfigValue('Ranking.solo.beatTarget', 10)) or 0
         if beatTarget and timeMs <= beatTarget and targetPoints ~= 0
-            and not RankingGivenToday(citizenid, 'solo-target', race.id)
-            and AddRankingPoints(citizenid, targetPoints, 'solo-target', race.id) then
-            delta = delta + targetPoints
+            and not RankingGivenToday(citizenid, 'solo-target', race.id) then
+            delta = delta + AddRankingPoints(citizenid, targetPoints, 'solo-target', race.id)
         end
         if delta ~= 0 then
             lines[#lines + 1] = ('🏆 ランキング %+dpt'):format(delta)
@@ -391,10 +426,11 @@ function Progression.OnSoloRaceRetired(src, citizenid, raceId)
     if not RankingEnabled() or not GetDriverProfile(citizenid) then return end
     local penalty = ToInteger(GetConfigValue('Ranking.solo.retire', -5)) or 0
     if penalty == 0 then return end
-    if AddRankingPoints(citizenid, penalty, 'solo-retire', raceId) then
+    local applied = AddRankingPoints(citizenid, penalty, 'solo-retire', raceId)
+    if applied ~= 0 then
         TriggerClientEvent('ox_lib:notify', src, {
             title = 'ランキング',
-            description = ('リタイアのため %+dpt'):format(penalty),
+            description = ('リタイアのため %+dpt'):format(applied),
             type = 'error'
         })
     end

@@ -572,11 +572,11 @@ document.addEventListener('DOMContentLoaded', function() {
     });
     
     // フィルターボタン
-    document.querySelectorAll('.filter-btn').forEach(btn => {
+    document.querySelectorAll('.filter-btn[data-filter]').forEach(btn => {
         btn.addEventListener('click', function() {
             if (this.classList.contains('active')) return;
             
-            document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+            document.querySelectorAll('.filter-btn[data-filter]').forEach(b => b.classList.remove('active'));
             this.classList.add('active');
             
             currentFilter = this.getAttribute('data-filter');
