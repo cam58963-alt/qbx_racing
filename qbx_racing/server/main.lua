@@ -1907,6 +1907,9 @@ RegisterNetEvent('qbx_racing:server:soloRaceStarted', function(raceId, mode)
     -- （スタート直後にスタート地点を通過した報告がすぐ届くため）
     local run = {raceId = raceId, startedAt = startedAt, daily = false, pending = {}, checkpoint = 1, lap = 1}
     soloRuns[src] = run
+    -- 切断時のリタイア処理のため（切断後はプレイヤー情報が取れない）
+    local starter = GetPlayer(src)
+    run.citizenid = starter and starter.PlayerData.citizenid
     
     -- 通過の確認に使うコース（チェックポイントは順番にしか進めない。ゴールはサーバーが確認した進捗が最終地点の時だけ）
     local race = MySQL.single.await('SELECT vehicle_type, race_type, laps FROM qbx_races WHERE id = ? AND is_active = 1', {raceId})
@@ -1970,7 +1973,9 @@ RegisterNetEvent('qbx_racing:server:soloProgress', function(raceId, checkpoint, 
     if run.pending then
         -- まだコースを読み込み中
         -- 位置は報告が届いた時点のものを使う（読み込み後の位置で確認すると先に進んだぶん離れてしまう）
-        if #run.pending < 8 then run.pending[#run.pending + 1] = {checkpoint, lap, GetServerPlayerCoords(src)} end
+        -- 上限は一番長いコース（チェックポイント最大数 + スタート地点）× 最大周回数
+        local maxReports = (GetConfigValue('Checkpoint.maxCheckpoints', 50) + 1) * GetConfigValue('RaceTypes.circuit.maxLaps', 10)
+        if #run.pending < maxReports then run.pending[#run.pending + 1] = {checkpoint, lap, GetServerPlayerCoords(src)} end
         return
     end
     ApplySoloProgress(src, run, checkpoint, lap)
@@ -2698,7 +2703,14 @@ end)
 AddEventHandler('playerDropped', function(reason)
     local src = source
     busyPlayers[src] = nil
+    
+    -- ソロの走行中に切断したらリタイア扱い（切断して投げ出すとペナルティを避けられないように）
+    local droppedRun = soloRuns[src]
     soloRuns[src] = nil
+    if droppedRun and not droppedRun.finishing and droppedRun.citizenid and Progression then
+        local ok, err = pcall(Progression.OnSoloRaceRetired, src, droppedRun.citizenid, droppedRun.raceId)
+        if not ok then print('^1[CAM Racing]^7 切断時のリタイア処理に失敗しました: ' .. tostring(err)) end
+    end
     
     local sessionIds = {}
     for sessionId in pairs(ActiveSessions) do
