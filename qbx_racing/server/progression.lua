@@ -58,13 +58,26 @@ local function CourseLength(race, checkpoints)
     return lap * laps, #checkpoints * laps
 end
 
--- TA の報酬（レート × 単位額）。コースの長さ・チェックポイント数・目標タイムから計算
-local function CalculateTimeAttackReward(lengthM, gates, targetMs)
+-- 低速ボーナス: 細道・カーブが多く平均速度が低いコースほど加算（車両タイプごとの基準速度と比べる）
+local function SlowCourseBonus(cfg, lengthM, targetMs, vehicleType)
+    local bonus = type(cfg.slowBonus) == 'table' and cfg.slowBonus or {}
+    if bonus.enabled == false or lengthM <= 0 or targetMs <= 0 then return 0 end
+    local references = type(bonus.referenceSpeed) == 'table' and bonus.referenceSpeed or {}
+    local reference = tonumber(references[vehicleType]) or tonumber(references.car) or 120.0
+    if reference <= 0 then return 0 end
+    local averageKmh = (lengthM / 1000) / (targetMs / 3600000)
+    local slowness = math.max(0, math.min(1, 1 - averageKmh / reference))
+    return slowness * (tonumber(bonus.weight) or 2.0)
+end
+
+-- TA の報酬（レート × 単位額）。コースの長さ・チェックポイント数・目標タイム・平均速度から計算
+local function CalculateTimeAttackReward(lengthM, gates, targetMs, vehicleType)
     local cfg = GetConfigValue('TimeAttack.reward', {})
     cfg = type(cfg) == 'table' and cfg or {}
     local score = (lengthM / 1000) * (tonumber(cfg.distanceWeight) or 0.5)
         + gates * (tonumber(cfg.checkpointWeight) or 0.05)
         + (targetMs / 60000) * (tonumber(cfg.timeWeight) or 0.5)
+        + SlowCourseBonus(cfg, lengthM, targetMs, vehicleType)
     local minRate = ToInteger(cfg.minRate) or 1
     local maxRate = math.max(minRate, ToInteger(cfg.maxRate) or 15)
     local rate = math.max(minRate, math.min(maxRate, math.floor(score + 0.5)))
@@ -112,7 +125,7 @@ function Progression.UpdateTargetTime(raceId)
     if not raceId then return nil end
 
     local race = MySQL.single.await([[
-        SELECT id, race_type, laps, target_time_ms, ta_calib_after_id FROM qbx_races WHERE id = ? AND is_active = 1
+        SELECT id, vehicle_type, race_type, laps, target_time_ms, ta_calib_after_id FROM qbx_races WHERE id = ? AND is_active = 1
     ]], {raceId})
     if not race or race.target_time_ms then return nil end
 
@@ -131,7 +144,7 @@ function Progression.UpdateTargetTime(raceId)
         SELECT x, y, z FROM qbx_race_checkpoints WHERE race_id = ? ORDER BY checkpoint_order ASC
     ]], {raceId}) or {}
     local length, gates = CourseLength(race, checkpoints)
-    local reward, rate = CalculateTimeAttackReward(length, gates, target)
+    local reward, rate = CalculateTimeAttackReward(length, gates, target, race.vehicle_type)
 
     local updated = MySQL.update.await([[
         UPDATE qbx_races SET target_time_ms = ?, ta_reward = ?, ta_rate = ?, course_length_m = ?

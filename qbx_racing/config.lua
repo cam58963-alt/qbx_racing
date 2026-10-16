@@ -460,6 +460,7 @@ Config.TimeAttack = {
 
     -- 報酬 = レート × unit（レートはコースの長さ・チェックポイント数・目標タイムから自動計算）
     -- スコア = 距離(km) × distanceWeight + チェックポイント数 × checkpointWeight + 目標タイム(分) × timeWeight
+    --        + 低速ボーナス（細道・カーブが多く平均速度が低いコースほど加算）
     -- レート = スコアを四捨五入して minRate ～ maxRate に収めたもの
     reward = {
         unit = 1000000,            -- レート1あたりの金額（100万）
@@ -467,7 +468,20 @@ Config.TimeAttack = {
         maxRate = 15,              -- 最高レート（1500万）
         distanceWeight = 0.5,      -- 1km ごとに +0.5
         checkpointWeight = 0.05,   -- チェックポイント 1個 ごとに +0.05（周回数ぶん数える）
-        timeWeight = 0.5           -- 1分 ごとに +0.5
+        timeWeight = 0.5,          -- 1分 ごとに +0.5
+        
+        -- 低速ボーナス = weight × (1 - 平均速度 / 基準速度)（平均速度が基準以上なら 0）
+        -- 平均速度 = コースの長さ ÷ 目標タイム。基準速度は車両タイプごと（ボートやヘリが元々遅い・速いぶんを補正）
+        -- 例: 自動車で 2km を 2分（時速60km）→ +1.0 / 5分（時速24km）→ +1.6
+        slowBonus = {
+            enabled = true,
+            weight = 2.0,
+            referenceSpeed = {     -- km/h
+                car = 120.0,
+                heli = 200.0,
+                boat = 80.0
+            }
+        }
     }
 }
 
