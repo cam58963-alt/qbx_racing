@@ -10,6 +10,10 @@ let currentFilter = 'all';
 let searchQuery = '';
 let isAdmin = false;
 let isCurrentlyRacing = false;
+let currentTab = 'home';
+let taData = null;
+let taFilter = 'all';
+let adminRaces = [];
 
 // タブレット (cam_tablet) のアプリとして開かれている場合はリソース名が入る
 // 例: nui://qbx_racing/html/index.html?tablet=cam_tablet
@@ -37,7 +41,7 @@ function handleMessage(data) {
             closeRacingUI();
             break;
         case 'updateRaces':
-            loadRaces();
+            refreshCurrentTab();
             break;
         case 'showDriverSetup':
             showDriverSetup();
@@ -117,11 +121,9 @@ function openRacingUI(data) {
         isAdmin = data.isAdmin || false;
         isCurrentlyRacing = data.isRacing || false;
         
-        if (isAdmin) {
-            document.getElementById('admin-controls').style.display = 'block';
-        } else {
-            document.getElementById('admin-controls').style.display = 'none';
-        }
+        // 管理タブは管理者だけ
+        document.getElementById('admin-tab-btn').style.display = isAdmin ? '' : 'none';
+        if (!isAdmin && currentTab === 'admin') currentTab = 'home';
         
         // レース中ならキャンセルボタンを表示
         const cancelControls = document.getElementById('race-cancel-controls');
@@ -129,7 +131,7 @@ function openRacingUI(data) {
             cancelControls.style.display = isCurrentlyRacing ? 'flex' : 'none';
         }
         
-        loadRaces();
+        switchTab(currentTab);
     } else {
         showDriverSetup();
     }
@@ -217,11 +219,12 @@ function askText(title, value) {
     return openAskModal('text', title, '', value, 'OK');
 }
 
-function askConfirm(title, message) {
+function askConfirm(title, message, okLabel, danger) {
+    okLabel = okLabel || '削除';
     if (IS_TABLET && typeof CamTablet !== 'undefined') {
-        return CamTablet.confirm({ title: title, message: message, okLabel: '削除', danger: true });
+        return CamTablet.confirm({ title: title, message: message, okLabel: okLabel, danger: danger !== false });
     }
-    return openAskModal('confirm', title, message, '', '削除').then(result => result === true);
+    return openAskModal('confirm', title, message, '', okLabel).then(result => result === true);
 }
 
 // エラーなどのお知らせ（画面下に数秒表示）
@@ -245,7 +248,7 @@ function showDriverSetup() {
 // レース一覧読み込み
 // ===================================
 function loadRaces() {
-    nuiPost('getRaces').then(races => {
+    return nuiPost('getRaces').then(races => {
         currentRaces = races || [];
         filterAndDisplayRaces();
     });
@@ -396,6 +399,9 @@ function showRaceDetail(raceId) {
     document.getElementById('detail-laps').textContent = race.laps || 1;
     document.getElementById('detail-creator').textContent = race.creator_driver_name || '不明';
     document.getElementById('detail-attempts').textContent = race.total_attempts || 0;
+    document.getElementById('detail-target').textContent = race.target_time_ms ? formatTime(race.target_time_ms) : '計測中';
+    document.getElementById('detail-reward').textContent = race.ta_reward
+        ? `${formatMoney(race.ta_reward)}（レート${race.ta_rate || '-'}）` : '-';
     
     // 管理者のみ削除ボタン表示
     const deleteBtn = document.getElementById('delete-race-btn');
@@ -487,7 +493,7 @@ function updateRaceHUD(data) {
     hud.style.display = 'block';
     
     document.getElementById('hud-race-type').textContent = data.raceType || '';
-    document.getElementById('hud-time').textContent = (data.time || '0.00') + 's';
+    document.getElementById('hud-time').textContent = (data.time || '0.00') + '秒';
     document.getElementById('hud-checkpoint').textContent = (data.checkpoint || 0) + ' / ' + (data.totalCheckpoints || 0);
     document.getElementById('hud-lap').textContent = (data.lap || 1) + ' / ' + (data.totalLaps || 1);
     
@@ -530,7 +536,7 @@ function formatTime(ms) {
     if (minutes > 0) {
         return `${minutes}:${seconds.toFixed(2).padStart(5, '0')}`;
     }
-    return `${seconds.toFixed(2)}s`;
+    return `${seconds.toFixed(2)}秒`;
 }
 
 function escapeHtml(text) {
@@ -622,7 +628,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 document.getElementById('current-driver-name').textContent = result.driverName;
                 document.getElementById('driver-setup-modal').style.display = 'none';
                 document.getElementById('main-screen').style.display = 'flex';
-                loadRaces();
+                switchTab('home');
             } else {
                 input.style.borderColor = '#ef4444';
                 input.style.boxShadow = '0 0 0 3px rgba(239, 68, 68, 0.2)';
@@ -664,6 +670,7 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('set-waypoint-btn').addEventListener('click', function() {
         if (!selectedRaceId) return;
         nuiPost('setStartWaypoint', { raceId: selectedRaceId });
+        showToast('スタート地点をマップに表示しました', 'success');
         
         const btn = this;
         btn.innerHTML = '<i class="fas fa-check"></i> マップにピンを設置しました！';
@@ -678,11 +685,8 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // レース開始
     document.getElementById('start-race-btn').addEventListener('click', function() {
-        if (!selectedRaceId || isLeaving) return;
-        
-        nuiPost('startRace', { raceId: selectedRaceId });
-        closeDetailModal();
-        leaveRacingUI();
+        if (!selectedRaceId) return;
+        startSoloRace(selectedRaceId, 'normal');
     });
     
     // 新規レース作成
@@ -697,7 +701,7 @@ document.addEventListener('DOMContentLoaded', function() {
         if (!selectedRaceId) return;
         
         const race = currentRaces.find(r => r.id === selectedRaceId);
-        const raceName = race ? race.name : 'Unknown';
+        const raceName = race ? race.name : '不明';
         
         if (await askConfirm('レース「' + raceName + '」を削除しますか？', 'この操作は取り消せません。')) {
             const btn = this;
@@ -707,7 +711,7 @@ document.addEventListener('DOMContentLoaded', function() {
             nuiPost('deleteRace', { raceId: selectedRaceId }).then(result => {
                 if (result && result.success) {
                     closeDetailModal();
-                    loadRaces();
+                    refreshCurrentTab();
                 } else {
                     showToast((result && result.message) || 'レースを削除できませんでした');
                 }
@@ -769,6 +773,38 @@ document.addEventListener('DOMContentLoaded', function() {
         nuiPost('retireRace');
     });
     
+    // タブ
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            switchTab(this.getAttribute('data-tab'));
+        });
+    });
+    
+    // タイムアタックの絞り込み
+    document.querySelectorAll('[data-ta-filter]').forEach(btn => {
+        btn.addEventListener('click', function() {
+            document.querySelectorAll('[data-ta-filter]').forEach(b => b.classList.remove('active'));
+            this.classList.add('active');
+            taFilter = this.getAttribute('data-ta-filter');
+            renderTimeAttack();
+        });
+    });
+    
+    // カード内のボタン（出走・スタート地点・管理操作）はまとめて受け取る
+    document.getElementById('main-screen').addEventListener('click', onActionClick);
+    
+    // デイリーの選び直し
+    document.getElementById('reroll-daily-btn').addEventListener('click', async function() {
+        if (!await askConfirm('今日のデイリーレースを選び直しますか？', '全員の今日のデイリーが変わります（受け取り済みの報酬はそのまま）。', '選び直す', false)) return;
+        const btn = this;
+        btn.disabled = true;
+        nuiPost('adminRerollDaily').then(result => {
+            showToast((result && result.message) || (result && result.success ? '選び直しました' : '選び直せませんでした'),
+                result && result.success ? 'success' : undefined);
+            refreshCurrentTab();
+        }).finally(() => { btn.disabled = false; });
+    });
+    
     if (IS_TABLET) {
         initTablet();
     }
@@ -816,4 +852,494 @@ function initTablet() {
         showToast('タブレットとの連携に失敗しました。タブレットを開き直してください');
     };
     document.head.appendChild(sdk);
+}
+
+// ===================================
+// タブ
+// ===================================
+function switchTab(tab) {
+    if (tab === 'admin' && !isAdmin) tab = 'home';
+    currentTab = tab;
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.getAttribute('data-tab') === tab);
+    });
+    document.querySelectorAll('.tab-panel').forEach(panel => {
+        panel.classList.toggle('active', panel.id === 'tab-' + tab);
+    });
+    refreshCurrentTab();
+}
+
+function refreshCurrentTab() {
+    switch (currentTab) {
+        case 'home': loadHome(); break;
+        case 'races': loadRaces(); break;
+        case 'ta': loadTimeAttack(); break;
+        case 'ranking': loadRanking(); break;
+        case 'admin': loadAdmin(); break;
+    }
+}
+
+// ===================================
+// 共通の表示部品
+// ===================================
+function formatMoney(amount) {
+    return '$' + Number(amount || 0).toLocaleString('en-US');
+}
+
+// 100万 → 「100万」
+function formatMan(amount) {
+    const n = Number(amount || 0);
+    if (n >= 10000) {
+        return (Math.round(n / 1000) / 10).toLocaleString('ja-JP') + '万';
+    }
+    return n.toLocaleString('ja-JP');
+}
+
+function formatDistance(meters) {
+    const m = Number(meters);
+    if (!m || m <= 0) return '-';
+    return m >= 1000 ? (m / 1000).toFixed(1) + 'km' : Math.round(m) + 'm';
+}
+
+function formatDate(value) {
+    if (!value) return '';
+    const date = new Date(typeof value === 'number' ? value : String(value).replace(' ', 'T'));
+    if (isNaN(date.getTime())) return '';
+    const pad = n => String(n).padStart(2, '0');
+    return `${pad(date.getMonth() + 1)}/${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function formatPoints(delta) {
+    const n = Number(delta || 0);
+    return (n > 0 ? '+' : '') + n + 'pt';
+}
+
+function reasonLabel(reason) {
+    const labels = {
+        'solo-finish': 'ソロ完走',
+        'solo-target': '目標タイム突破',
+        'solo-retire': 'リタイア',
+        'multi': 'マルチプレイ'
+    };
+    return labels[reason] || reason || '';
+}
+
+function badgesHtml(vehicleType, raceType) {
+    const v = getVehicleConfig(vehicleType);
+    const r = getRaceTypeConfig(raceType);
+    return `
+        <div class="badge-group">
+            <div class="vehicle-badge ${escapeHtml(vehicleType || 'car')}"><i class="${v.icon}"></i> ${v.label}</div>
+            <div class="race-type-badge ${escapeHtml(raceType || 'circuit')}"><i class="${r.icon}"></i> ${r.label}</div>
+        </div>`;
+}
+
+function emptyHtml(icon, text, hint) {
+    return `
+        <div class="no-races">
+            <i class="fas ${icon}"></i>
+            <p>${escapeHtml(text)}</p>
+            ${hint ? `<p class="hint">${escapeHtml(hint)}</p>` : ''}
+        </div>`;
+}
+
+function rankBadgeClass(rank) {
+    return rank === 1 ? 'gold' : rank === 2 ? 'silver' : rank === 3 ? 'bronze' : 'normal';
+}
+
+function updateHeaderPoints(profile) {
+    const el = document.getElementById('header-points');
+    if (!profile) {
+        el.style.display = 'none';
+        return;
+    }
+    el.innerHTML = `<i class="fas fa-trophy"></i> ${Number(profile.points || 0).toLocaleString('ja-JP')}pt・${profile.rank}位`;
+    el.style.display = '';
+}
+
+// ===================================
+// ホーム
+// ===================================
+function loadHome() {
+    nuiPost('getHomeData').then(data => {
+        if (!data || data.error) {
+            document.getElementById('daily-list').innerHTML = emptyHtml('fa-triangle-exclamation', 'データを取得できませんでした');
+            return;
+        }
+        renderHome(data);
+    });
+}
+
+function profileCardHtml(profile, extra) {
+    return `
+        <div class="profile-main">
+            <div class="profile-avatar"><i class="fas fa-helmet-safety"></i></div>
+            <div class="profile-text">
+                <div class="profile-name">${escapeHtml(profile.driverName)}</div>
+                <div class="profile-rank">${profile.rank ? `ランキング <b>${profile.rank}位</b>` : ''}${extra || ''}</div>
+            </div>
+            <div class="profile-points">
+                <span class="value">${Number(profile.points || 0).toLocaleString('ja-JP')}</span>
+                <span class="label">pt</span>
+            </div>
+        </div>`;
+}
+
+function renderHome(data) {
+    const features = data.features || {};
+    const profile = data.profile;
+    updateHeaderPoints(profile);
+    
+    // プロフィール
+    const profileEl = document.getElementById('home-profile');
+    if (profile) {
+        profileEl.innerHTML = profileCardHtml(profile) + `
+            <div class="profile-stats">
+                <div class="profile-stat"><span class="value">${profile.totalRaces}</span><span class="label">完走</span></div>
+                <div class="profile-stat"><span class="value">${profile.totalWins}</span><span class="label">マルチ優勝</span></div>
+                <div class="profile-stat"><span class="value">${profile.taCleared}</span><span class="label">TA達成</span></div>
+                <div class="profile-stat"><span class="value">${formatMan(profile.taEarned)}</span><span class="label">TA獲得額</span></div>
+            </div>`;
+    } else {
+        profileEl.innerHTML = '';
+    }
+    
+    // 今日のデイリー
+    const daily = data.daily || {};
+    document.getElementById('daily-day').textContent = daily.day ? daily.day.replace(/-/g, '/') : '';
+    const list = document.getElementById('daily-list');
+    const races = daily.races || [];
+    if (features.daily === false) {
+        list.innerHTML = emptyHtml('fa-calendar-xmark', 'デイリーレースは無効になっています');
+    } else if (races.length === 0) {
+        list.innerHTML = emptyHtml('fa-calendar-day', '今日のデイリーレースはまだありません',
+            '目標タイムが決まっているレースから選ばれます（タイムアタックのタブを参照）');
+    } else {
+        list.innerHTML = races.map(dailyCardHtml).join('');
+    }
+    
+    // ランキング上位
+    const top = data.top || [];
+    document.getElementById('home-top').innerHTML = features.ranking === false
+        ? '<p class="muted">ランキングは無効になっています</p>'
+        : top.length === 0 ? '<p class="muted">まだ誰もいません</p>'
+        : top.map(row => `
+            <div class="mini-row">
+                <div class="rank-badge ${rankBadgeClass(row.rank)}">${row.rank}</div>
+                <div class="mini-name">${escapeHtml(row.driver_name)}</div>
+                <div class="mini-value">${Number(row.points || 0).toLocaleString('ja-JP')}pt</div>
+            </div>`).join('');
+    
+    // 最近のポイント変動
+    const recent = data.recent || [];
+    document.getElementById('home-recent').innerHTML = recent.length === 0
+        ? '<p class="muted">まだありません。レースを走るとポイントが変動します</p>'
+        : recent.map(row => `
+            <div class="mini-row">
+                <div class="mini-name">
+                    ${escapeHtml(reasonLabel(row.reason))}
+                    <span class="mini-sub">${escapeHtml(row.race_name || '')}・${formatDate(row.created_at)}</span>
+                </div>
+                <div class="mini-value ${row.delta >= 0 ? 'plus' : 'minus'}">${formatPoints(row.delta)}</div>
+            </div>`).join('');
+}
+
+function dailyCardHtml(d) {
+    const step = (claimed, icon, label, amount) => `
+        <div class="reward-step ${claimed ? 'claimed' : ''}">
+            <i class="fas ${claimed ? 'fa-circle-check' : icon}"></i>
+            <span>${label}</span>
+            <b>${formatMoney(amount)}</b>
+        </div>`;
+    return `
+        <div class="daily-card ${d.completed ? 'done' : ''}">
+            <div class="race-header">
+                <div class="race-name">${escapeHtml(d.name)}</div>
+                ${badgesHtml(d.vehicleType, d.raceType)}
+            </div>
+            <div class="daily-info">
+                <span><i class="fas fa-bullseye"></i> 目標 <b>${formatTime(d.targetTimeMs)}</b></span>
+                <span><i class="fas fa-route"></i> ${formatDistance(d.lengthM)}</span>
+                ${d.raceType === 'circuit' ? `<span><i class="fas fa-redo"></i> ${d.laps || 1}周</span>` : ''}
+                <span><i class="fas fa-sack-dollar"></i> 合計 <b>${formatMoney(d.reward)}</b></span>
+            </div>
+            <div class="reward-steps">
+                ${step(d.finishClaimed, 'fa-flag-checkered', '完走', d.finishReward)}
+                ${step(d.targetClaimed, 'fa-bullseye', '目標タイム', d.targetReward)}
+            </div>
+            <div class="card-actions">
+                <button class="btn-small" data-action="waypoint" data-race-id="${d.raceId}">
+                    <i class="fas fa-map-marker-alt"></i> スタート地点
+                </button>
+                <button class="btn-small primary" data-action="daily" data-race-id="${d.raceId}" ${d.completed ? 'disabled' : ''}>
+                    ${d.completed ? '<i class="fas fa-check"></i> 今日の分は受け取り済み' : '<i class="fas fa-play"></i> デイリー出走'}
+                </button>
+            </div>
+        </div>`;
+}
+
+// ===================================
+// タイムアタック
+// ===================================
+function loadTimeAttack() {
+    nuiPost('getTimeAttack').then(data => {
+        taData = data && !data.error ? data : null;
+        renderTimeAttack();
+    });
+}
+
+function taStatus(race) {
+    if (!race.target_time_ms) return 'pending';
+    return race.claimed_time ? 'cleared' : 'open';
+}
+
+function renderTimeAttack() {
+    const list = document.getElementById('ta-list');
+    if (!taData) {
+        list.innerHTML = emptyHtml('fa-triangle-exclamation', 'データを取得できませんでした');
+        return;
+    }
+    if (!taData.enabled) {
+        list.innerHTML = emptyHtml('fa-stopwatch', 'タイムアタックは無効になっています');
+        return;
+    }
+    const runs = taData.calibrationRuns || 10;
+    document.getElementById('ta-desc').textContent =
+        `レース作成後、最初の${runs}回のゴールの平均タイムが目標タイムになります。` +
+        '目標タイム以内でゴールすると、1レースにつき1回だけ報酬がもらえます。';
+    
+    const races = (taData.races || []).filter(race => taFilter === 'all' || taStatus(race) === taFilter);
+    if (races.length === 0) {
+        list.innerHTML = emptyHtml('fa-stopwatch', '該当するレースがありません');
+        return;
+    }
+    list.innerHTML = races.map(race => taCardHtml(race, runs)).join('');
+}
+
+function taCardHtml(race, runs) {
+    const status = taStatus(race);
+    const chips = {
+        pending: '<span class="status-chip pending"><i class="fas fa-hourglass-half"></i> 計測中</span>',
+        open: '<span class="status-chip open"><i class="fas fa-bullseye"></i> 未達成</span>',
+        cleared: '<span class="status-chip cleared"><i class="fas fa-circle-check"></i> 達成済み</span>'
+    };
+    let body;
+    if (status === 'pending') {
+        const count = Math.min(Number(race.calib_count || 0), runs);
+        body = `
+            <div class="ta-pending">
+                <div class="ta-pending-text">目標タイム計測中 <b>${count} / ${runs}</b></div>
+                <div class="progress"><div class="progress-bar" style="width: ${Math.round(count / runs * 100)}%"></div></div>
+                <div class="muted">あと${runs - count}回ゴールがあると目標タイムと報酬が決まります</div>
+            </div>`;
+    } else {
+        const myBest = Number(race.my_best || 0);
+        const diff = myBest ? myBest - race.target_time_ms : null;
+        body = `
+            <div class="ta-target">
+                <div>
+                    <div class="ta-label">目標タイム</div>
+                    <div class="ta-time">${formatTime(race.target_time_ms)}</div>
+                </div>
+                <div class="ta-reward">
+                    <div class="ta-label">報酬（レート${race.ta_rate || '-'}）</div>
+                    <div class="ta-money">${formatMoney(race.ta_reward)}</div>
+                </div>
+            </div>
+            <div class="stat-row">
+                <span><i class="fas fa-user-clock"></i> 自己ベスト</span>
+                <span class="stat-value">${myBest ? formatTime(myBest) : '記録なし'}
+                    ${diff !== null ? `<span class="${diff <= 0 ? 'plus' : 'minus'}">（${diff <= 0 ? '' : '+'}${(diff / 1000).toFixed(2)}秒）</span>` : ''}
+                </span>
+            </div>
+            <div class="stat-row">
+                <span><i class="fas fa-route"></i> コース</span>
+                <span class="stat-value">${formatDistance(race.course_length_m)}${race.race_type === 'circuit' ? `・${race.laps || 1}周` : ''}</span>
+            </div>`;
+    }
+    return `
+        <div class="race-card ta-card ${status}">
+            <div class="race-header">
+                <div class="race-name">${escapeHtml(race.name)}</div>
+                <div class="badge-row">${chips[status]}</div>
+                ${badgesHtml(race.vehicle_type, race.race_type)}
+            </div>
+            ${body}
+            <div class="card-actions">
+                <button class="btn-small" data-action="waypoint" data-race-id="${race.id}">
+                    <i class="fas fa-map-marker-alt"></i> スタート地点
+                </button>
+                <button class="btn-small primary" data-action="start" data-race-id="${race.id}">
+                    <i class="fas fa-play"></i> ${status === 'pending' ? '走って計測' : '挑戦する'}
+                </button>
+            </div>
+        </div>`;
+}
+
+// ===================================
+// ランキング
+// ===================================
+function loadRanking() {
+    nuiPost('getRanking').then(data => renderRanking(data && !data.error ? data : null));
+}
+
+function renderRanking(data) {
+    const listEl = document.getElementById('ranking-list');
+    const meEl = document.getElementById('ranking-me');
+    if (!data) {
+        listEl.innerHTML = emptyHtml('fa-triangle-exclamation', 'データを取得できませんでした');
+        return;
+    }
+    if (!data.enabled) {
+        meEl.innerHTML = '';
+        listEl.innerHTML = emptyHtml('fa-trophy', 'ランキングは無効になっています');
+        return;
+    }
+    
+    meEl.innerHTML = data.me
+        ? profileCardHtml(data.me, ` <span class="muted">/ ${data.totalDrivers}人</span>`)
+        : '';
+    updateHeaderPoints(data.me);
+    
+    const rules = data.rules || {};
+    document.getElementById('ranking-rules').innerHTML = `
+        <li><span>ソロで完走</span><b class="plus">${formatPoints(rules.soloFinish)}</b></li>
+        <li><span>ソロで目標タイム以内</span><b class="plus">${formatPoints(rules.soloTarget)}</b></li>
+        <li><span>ソロでリタイア</span><b class="minus">${formatPoints(rules.soloRetire)}</b></li>
+        <li><span>マルチ: 自分より下の順位1人ごとに</span><b class="plus">${formatPoints(rules.perOpponent)}</b></li>
+        <li><span>マルチ: 自分より上の順位1人ごとに</span><b class="minus">${formatPoints(-(rules.perOpponent || 0))}</b></li>
+        <li class="muted">ソロの加点は同じレースで1日1回まで。マルチのリタイアはゴールした人より下の順位になります。</li>`;
+    
+    const top = data.top || [];
+    if (top.length === 0) {
+        listEl.innerHTML = emptyHtml('fa-trophy', 'まだ誰もいません');
+        return;
+    }
+    const myName = data.me && data.me.driverName;
+    listEl.innerHTML = `
+        <div class="table-row table-head">
+            <span>順位</span><span>ドライバー</span><span>ポイント</span><span>完走</span><span>優勝</span>
+        </div>` + top.map(row => `
+        <div class="table-row ${row.driver_name === myName ? 'me' : ''}">
+            <span><div class="rank-badge ${rankBadgeClass(row.rank)}">${row.rank}</div></span>
+            <span class="table-name">${escapeHtml(row.driver_name)}</span>
+            <span class="table-points">${Number(row.points || 0).toLocaleString('ja-JP')}pt</span>
+            <span>${row.total_races || 0}</span>
+            <span>${row.total_wins || 0}</span>
+        </div>`).join('');
+}
+
+// ===================================
+// 管理
+// ===================================
+function loadAdmin() {
+    nuiPost('getTimeAttack').then(data => renderAdmin(data && !data.error ? data : null));
+}
+
+function renderAdmin(data) {
+    const listEl = document.getElementById('admin-list');
+    if (!data) {
+        listEl.innerHTML = emptyHtml('fa-triangle-exclamation', 'データを取得できませんでした');
+        return;
+    }
+    const races = data.races || [];
+    adminRaces = races;
+    if (races.length === 0) {
+        listEl.innerHTML = emptyHtml('fa-flag-checkered', 'レースがありません', '「新規レース作成」から作成できます');
+        return;
+    }
+    const runs = data.calibrationRuns || 10;
+    listEl.innerHTML = `
+        <div class="table-row table-head admin-row">
+            <span>レース</span><span>目標タイム</span><span>TA報酬</span><span>操作</span>
+        </div>` + races.map(race => `
+        <div class="table-row admin-row">
+            <span class="table-name">
+                ${escapeHtml(race.name)}
+                ${badgesHtml(race.vehicle_type, race.race_type)}
+            </span>
+            <span>${race.target_time_ms ? formatTime(race.target_time_ms)
+                : `<span class="muted">計測中 ${Math.min(Number(race.calib_count || 0), runs)}/${runs}</span>`}</span>
+            <span>${race.ta_reward ? `${formatMoney(race.ta_reward)}<span class="muted">（レート${race.ta_rate}）</span>` : '-'}</span>
+            <span class="table-actions">
+                <button class="btn-small" data-action="detail" data-race-id="${race.id}" title="詳細"><i class="fas fa-eye"></i> 詳細</button>
+                <button class="btn-small" data-action="reset-target" data-race-id="${race.id}" title="目標タイムを計測し直す"
+                    ${race.target_time_ms ? '' : 'disabled'}><i class="fas fa-rotate-left"></i> 目標リセット</button>
+                <button class="btn-small danger" data-action="delete" data-race-id="${race.id}" title="削除">
+                    <i class="fas fa-trash-alt"></i> 削除</button>
+            </span>
+        </div>`).join('');
+}
+
+// ===================================
+// カード内のボタン
+// ===================================
+let startPending = false;
+function startSoloRace(raceId, mode) {
+    if (!raceId || isLeaving || startPending) return;
+    startPending = true;
+    nuiPost('startRace', { raceId: raceId, mode: mode }).then(result => {
+        if (result && result.success) {
+            closeDetailModal();
+            leaveRacingUI();
+        } else {
+            showToast((result && result.message) || 'レースを開始できませんでした');
+        }
+    }).finally(() => { startPending = false; });
+}
+
+function openRaceDetail(raceId) {
+    if (currentRaces.some(r => r.id === raceId)) {
+        showRaceDetail(raceId);
+        return;
+    }
+    loadRaces().then(() => showRaceDetail(raceId));
+}
+
+async function onActionClick(e) {
+    const btn = e.target.closest('[data-action]');
+    if (!btn || btn.disabled) return;
+    e.stopPropagation();
+    const raceId = Number(btn.getAttribute('data-race-id'));
+    
+    switch (btn.getAttribute('data-action')) {
+        case 'daily':
+            startSoloRace(raceId, 'daily');
+            break;
+        case 'start':
+            startSoloRace(raceId, 'normal');
+            break;
+        case 'waypoint':
+            nuiPost('setStartWaypoint', { raceId: raceId });
+            showToast('スタート地点をマップに表示しました', 'success');
+            break;
+        case 'detail':
+            openRaceDetail(raceId);
+            break;
+        case 'reset-target':
+            if (!await askConfirm('目標タイムをリセットしますか？',
+                'これ以降のゴールで目標タイムと報酬を計測し直します（受け取り済みの報酬はそのまま）。', 'リセット')) return;
+            nuiPost('adminResetTarget', { raceId: raceId }).then(result => {
+                if (result && result.success) {
+                    showToast('目標タイムをリセットしました', 'success');
+                    refreshCurrentTab();
+                } else {
+                    showToast((result && result.message) || 'リセットできませんでした');
+                }
+            });
+            break;
+        case 'delete': {
+            const race = adminRaces.find(r => r.id === raceId);
+            const name = race ? race.name : '';
+            if (!await askConfirm('レース「' + name + '」を削除しますか？', 'この操作は取り消せません。')) return;
+            nuiPost('deleteRace', { raceId: raceId }).then(result => {
+                if (result && result.success) {
+                    refreshCurrentTab();
+                } else {
+                    showToast((result && result.message) || 'レースを削除できませんでした');
+                }
+            });
+            break;
+        }
+    }
 }

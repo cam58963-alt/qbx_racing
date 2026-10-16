@@ -711,34 +711,55 @@ end)
 -- NUIコールバック: ソロレース
 -- ===================================
 
--- レース開始
+-- レース開始（mode = 'daily' ならデイリーレースとして走る）
 RegisterNUICallback('startRace', function(data, cb)
     if not data or not data.raceId then
-        cb({})
+        cb({success = false, message = 'レースIDが指定されていません'})
         return
     end
     
-    DebugLog('Starting solo race: ' .. data.raceId)
+    local mode = data.mode == 'daily' and 'daily' or 'normal'
+    DebugLog('Starting solo race: ' .. data.raceId .. ' (' .. mode .. ')')
     
-    lib.callback('qbx_racing:getRaceDetails', false, function(race)
-        if race then
-            -- UIを閉じてレース開始
-            CloseMenuUI()
-            
-            TriggerEvent('qbx_racing:client:startSoloRace', race)
-            DebugLog('Solo race started successfully')
-        else
-            lib.notify({
-                title = 'エラー',
-                description = 'レース情報の取得に失敗しました',
-                type = 'error'
-            })
-            DebugLog('Failed to get race details')
+    -- デイリーは報酬が残っている時だけ出走できる
+    if mode == 'daily' then
+        local check = lib.callback.await('qbx_racing:server:canStartDaily', false, data.raceId)
+        if not check or not check.success then
+            cb({success = false, message = check and check.message or 'サーバーエラー'})
+            return
         end
-    end, data.raceId)
+    end
     
-    cb({})
+    local race = lib.callback.await('qbx_racing:getRaceDetails', false, data.raceId)
+    if not race then
+        cb({success = false, message = 'レース情報の取得に失敗しました'})
+        return
+    end
+    
+    -- UIを閉じてレース開始
+    cb({success = true})
+    CloseMenuUI()
+    race.playMode = mode
+    TriggerEvent('qbx_racing:client:startSoloRace', race)
+    DebugLog('Solo race started successfully')
 end)
+
+-- ===================================
+-- NUIコールバック: ホーム・タイムアタック・ランキング・管理
+-- ===================================
+local function ForwardCallback(nuiName, serverName, fallback)
+    RegisterNUICallback(nuiName, function(data, cb)
+        lib.callback(serverName, false, function(result)
+            cb(result or fallback)
+        end, data and data.raceId)
+    end)
+end
+
+ForwardCallback('getHomeData', 'qbx_racing:getHomeData', {error = true})
+ForwardCallback('getTimeAttack', 'qbx_racing:getTimeAttack', {error = true})
+ForwardCallback('getRanking', 'qbx_racing:getRanking', {error = true})
+ForwardCallback('adminResetTarget', 'qbx_racing:server:adminResetTarget', {success = false, message = 'サーバーエラー'})
+ForwardCallback('adminRerollDaily', 'qbx_racing:server:adminRerollDaily', {success = false, message = 'サーバーエラー'})
 
 -- ===================================
 -- NUIコールバック: マルチプレイヤー

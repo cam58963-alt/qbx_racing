@@ -13,7 +13,7 @@
 }
 
 body {
-    font-family: 'Inter', sans-serif;
+    font-family: 'Inter', 'Noto Sans JP', 'Hiragino Sans', 'Meiryo', sans-serif;
     background: transparent;
     overflow: hidden;
     color: #e2e8f0;
@@ -1129,6 +1129,653 @@ body.menu-open .race-hud {
 .btn-admin:hover {
     transform: translateY(-2px);
     box-shadow: 0 6px 20px rgba(16, 185, 129, 0.4);
+}
+
+/* ===================================
+   タブ
+   =================================== */
+.tab-bar {
+    display: flex;
+    gap: 6px;
+    background: rgba(0, 0, 0, 0.2);
+    padding: 4px;
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    flex-wrap: wrap;
+}
+
+.tab-btn {
+    background: transparent;
+    border: 1px solid transparent;
+    color: #94a3b8;
+    padding: 10px 18px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.25s ease;
+    font-size: 0.9rem;
+    font-weight: 600;
+    font-family: inherit;
+    white-space: nowrap;
+}
+
+.tab-btn:hover {
+    color: #e2e8f0;
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.tab-btn.active {
+    background: linear-gradient(135deg, #ef4444, #dc2626);
+    color: #fff;
+    box-shadow: 0 2px 12px rgba(239, 68, 68, 0.35);
+}
+
+.tab-panel {
+    display: none;
+    flex: 1;
+    min-height: 0;
+    flex-direction: column;
+}
+
+.tab-panel.active {
+    display: flex;
+    animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+.header-points {
+    margin-left: 6px;
+    padding-left: 10px;
+    border-left: 1px solid rgba(255, 255, 255, 0.1);
+    color: #fbbf24;
+    font-weight: 600;
+}
+
+.toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+}
+
+.toolbar .search-bar {
+    flex: 1;
+    min-width: 240px;
+    margin-bottom: 0;
+}
+
+.toolbar .section-desc {
+    flex: 1;
+    min-width: 240px;
+    margin: 0;
+}
+
+.section-title {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin: 20px 0 6px;
+}
+
+.section-title h3, .side-card h3 {
+    font-size: 1rem;
+    font-weight: 700;
+    color: #f1f5f9;
+}
+
+.section-title h3 i, .side-card h3 i {
+    color: #ef4444;
+    margin-right: 4px;
+}
+
+.section-sub {
+    color: #64748b;
+    font-size: 0.85rem;
+}
+
+.section-desc {
+    color: #94a3b8;
+    font-size: 0.85rem;
+    line-height: 1.5;
+    margin-bottom: 12px;
+}
+
+.muted {
+    color: #64748b;
+    font-size: 0.8rem;
+}
+
+.plus { color: #34d399; }
+.minus { color: #f87171; }
+
+/* 小さいボタン（カード内） */
+.card-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 14px;
+}
+
+.btn-small {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: #cbd5e1;
+    padding: 8px 12px;
+    border-radius: 9px;
+    cursor: pointer;
+    font-size: 0.8rem;
+    font-weight: 600;
+    font-family: inherit;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+}
+
+.card-actions .btn-small {
+    flex: 1;
+}
+
+.btn-small:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.12);
+    color: #fff;
+}
+
+.btn-small.primary {
+    background: linear-gradient(135deg, #ef4444, #dc2626);
+    border-color: transparent;
+    color: #fff;
+}
+
+.btn-small.primary:hover:not(:disabled) {
+    box-shadow: 0 4px 14px rgba(239, 68, 68, 0.4);
+}
+
+.btn-small.danger {
+    border-color: rgba(239, 68, 68, 0.35);
+    color: #f87171;
+}
+
+.btn-small.danger:hover:not(:disabled) {
+    background: #ef4444;
+    color: #fff;
+}
+
+.btn-small:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+/* ===================================
+   ホーム
+   =================================== */
+.home-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
+    gap: 20px;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 6px;
+}
+
+.home-main, .home-side, .ranking-side {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    min-width: 0;
+}
+
+.home-main {
+    gap: 0;
+}
+
+.profile-card, .side-card {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 14px;
+    padding: 18px;
+}
+
+.profile-card:empty {
+    display: none;
+}
+
+.side-card h3 {
+    margin-bottom: 12px;
+}
+
+.profile-main {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+}
+
+.profile-avatar {
+    width: 52px;
+    height: 52px;
+    border-radius: 14px;
+    background: linear-gradient(135deg, #ef4444, #f97316);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.4rem;
+    color: #fff;
+    flex-shrink: 0;
+}
+
+.profile-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.profile-name {
+    font-size: 1.25rem;
+    font-weight: 800;
+    color: #f1f5f9;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.profile-rank {
+    color: #94a3b8;
+    font-size: 0.85rem;
+    margin-top: 2px;
+}
+
+.profile-rank b {
+    color: #fbbf24;
+}
+
+.profile-points {
+    text-align: right;
+}
+
+.profile-points .value {
+    font-size: 1.8rem;
+    font-weight: 800;
+    color: #fbbf24;
+}
+
+.profile-points .label {
+    color: #94a3b8;
+    margin-left: 2px;
+}
+
+.profile-stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    margin-top: 16px;
+}
+
+.profile-stat {
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 10px;
+    padding: 10px;
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.profile-stat .value {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: #f1f5f9;
+}
+
+.profile-stat .label {
+    font-size: 0.72rem;
+    color: #64748b;
+}
+
+.daily-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 14px;
+}
+
+.daily-card {
+    background: linear-gradient(160deg, rgba(251, 191, 36, 0.08), rgba(239, 68, 68, 0.06));
+    border: 1px solid rgba(251, 191, 36, 0.25);
+    border-radius: 14px;
+    padding: 18px;
+}
+
+.daily-card.done {
+    background: rgba(255, 255, 255, 0.03);
+    border-color: rgba(255, 255, 255, 0.07);
+    opacity: 0.75;
+}
+
+.daily-info {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 16px;
+    color: #94a3b8;
+    font-size: 0.85rem;
+}
+
+.daily-info i {
+    color: #fbbf24;
+    margin-right: 2px;
+}
+
+.daily-info b {
+    color: #f1f5f9;
+}
+
+.reward-steps {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.reward-step {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-size: 0.82rem;
+    color: #cbd5e1;
+}
+
+.reward-step i {
+    color: #fbbf24;
+}
+
+.reward-step b {
+    margin-left: auto;
+    color: #fbbf24;
+}
+
+.reward-step.claimed {
+    color: #64748b;
+}
+
+.reward-step.claimed i, .reward-step.claimed b {
+    color: #34d399;
+}
+
+.reward-step.claimed b {
+    text-decoration: line-through;
+}
+
+.mini-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.mini-row:last-child {
+    border-bottom: none;
+}
+
+.mini-row .rank-badge {
+    width: 28px;
+    height: 28px;
+    font-size: 0.78rem;
+}
+
+.mini-name {
+    flex: 1;
+    min-width: 0;
+    color: #e2e8f0;
+    font-size: 0.88rem;
+    font-weight: 600;
+    display: flex;
+    flex-direction: column;
+}
+
+.mini-sub {
+    color: #64748b;
+    font-size: 0.75rem;
+    font-weight: 400;
+}
+
+.mini-value {
+    font-weight: 700;
+    color: #fbbf24;
+    font-size: 0.9rem;
+}
+
+.mini-value.plus { color: #34d399; }
+.mini-value.minus { color: #f87171; }
+
+/* ===================================
+   タイムアタック
+   =================================== */
+.ta-card {
+    cursor: default;
+    display: flex;
+    flex-direction: column;
+}
+
+.ta-card .card-actions {
+    margin-top: auto;
+    padding-top: 14px;
+}
+
+.ta-card.cleared {
+    border-color: rgba(16, 185, 129, 0.3);
+}
+
+.badge-row {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+}
+
+.ta-card .race-header {
+    padding-top: 22px;
+}
+
+.status-chip {
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.status-chip.pending { background: rgba(148, 163, 184, 0.15); color: #cbd5e1; }
+.status-chip.open { background: rgba(239, 68, 68, 0.15); color: #f87171; }
+.status-chip.cleared { background: rgba(16, 185, 129, 0.15); color: #34d399; }
+
+.ta-target {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    background: rgba(0, 0, 0, 0.25);
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+}
+
+.ta-label {
+    font-size: 0.72rem;
+    color: #64748b;
+    margin-bottom: 2px;
+}
+
+.ta-time {
+    font-size: 1.5rem;
+    font-weight: 800;
+    color: #f1f5f9;
+    font-variant-numeric: tabular-nums;
+}
+
+.ta-reward {
+    text-align: right;
+}
+
+.ta-money {
+    font-size: 1.15rem;
+    font-weight: 800;
+    color: #fbbf24;
+}
+
+.ta-pending {
+    background: rgba(0, 0, 0, 0.25);
+    border-radius: 10px;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.ta-pending-text {
+    color: #cbd5e1;
+    font-size: 0.9rem;
+}
+
+.progress {
+    height: 8px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.08);
+    overflow: hidden;
+}
+
+.progress-bar {
+    height: 100%;
+    background: linear-gradient(90deg, #ef4444, #fbbf24);
+    border-radius: 8px;
+}
+
+/* ===================================
+   ランキング・管理の表
+   =================================== */
+.ranking-layout {
+    display: grid;
+    grid-template-columns: minmax(280px, 1fr) minmax(0, 2fr);
+    gap: 20px;
+    flex: 1;
+    min-height: 0;
+}
+
+.ranking-table-wrap, .admin-table {
+    overflow-y: auto;
+    min-height: 0;
+    padding-right: 6px;
+}
+
+.admin-table {
+    flex: 1;
+}
+
+.rule-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.rule-list li {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 0.85rem;
+    color: #cbd5e1;
+}
+
+.table-row {
+    display: grid;
+    grid-template-columns: 70px minmax(0, 1fr) 120px 70px 70px;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    margin-bottom: 6px;
+    font-size: 0.88rem;
+    color: #cbd5e1;
+}
+
+.table-row.table-head {
+    background: transparent;
+    border: none;
+    color: #64748b;
+    font-size: 0.78rem;
+    font-weight: 600;
+    position: sticky;
+    top: 0;
+    background: #141634;
+    z-index: 1;
+}
+
+.table-row.me {
+    border-color: rgba(251, 191, 36, 0.4);
+    background: rgba(251, 191, 36, 0.08);
+}
+
+.table-name {
+    font-weight: 600;
+    color: #f1f5f9;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.table-points {
+    font-weight: 700;
+    color: #fbbf24;
+}
+
+.table-row.admin-row {
+    grid-template-columns: minmax(0, 1fr) 110px 190px 260px;
+}
+
+.admin-row .table-name {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.admin-row .badge-group {
+    flex-direction: row;
+}
+
+.table-actions {
+    display: flex;
+    gap: 6px;
+    justify-content: flex-end;
+}
+
+.admin-actions {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+}
+
+.btn-admin.secondary {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: #e2e8f0;
+    box-shadow: none;
+}
+
+.btn-admin:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+@media (max-width: 1100px) {
+    .home-grid, .ranking-layout {
+        grid-template-columns: 1fr;
+    }
+    .profile-stats {
+        grid-template-columns: repeat(2, 1fr);
+    }
 }
 
 /* ===================================

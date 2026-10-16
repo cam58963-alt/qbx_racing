@@ -850,7 +850,7 @@ function StartRace(race)
         
         isRacing = true
         raceStartTime = GetGameTimer()
-        TriggerServerEvent('qbx_racing:server:soloRaceStarted', thisRace.id)
+        TriggerServerEvent('qbx_racing:server:soloRaceStarted', thisRace.id, thisRace.playMode)
         
         -- ソロ用ゴーストモード開始（NPC衝突回避）
         StartSoloGhostMode()
@@ -1072,6 +1072,9 @@ function RetireSoloRace(reason)
     if not isRacing then return end
     
     DebugLog('Solo race retired')
+    if currentRace then
+        TriggerServerEvent('qbx_racing:server:soloRaceRetired', currentRace.id)
+    end
     
     lib.notify({
         title = 'リタイア',

@@ -126,9 +126,12 @@ end
 
 -- 未払いの支払い予定を実行する（sessionId が nil なら全セッション分）
 -- sources: citizenid → source（オンラインの人に直接渡すため。無ければ citizenid で渡す）
-local function SettlePayouts(sessionId, sources)
+-- citizenid を指定すると、そのセッションのその人の分だけ（TA・デイリー報酬は session_id = 0 で共通のため）
+local function SettlePayouts(sessionId, sources, citizenid)
     local rows
-    if sessionId then
+    if sessionId and citizenid then
+        rows = MySQL.query.await('SELECT id, citizenid, amount, reason FROM qbx_race_payouts WHERE session_id = ? AND citizenid = ? AND paid = 0', {sessionId, citizenid})
+    elseif sessionId then
         rows = MySQL.query.await('SELECT id, citizenid, amount, reason FROM qbx_race_payouts WHERE session_id = ? AND paid = 0', {sessionId})
     else
         rows = MySQL.query.await('SELECT id, citizenid, amount, reason FROM qbx_race_payouts WHERE paid = 0')
@@ -308,9 +311,9 @@ lib.callback.register('qbx_racing:server:registerDriver', function(source, data)
     
     -- 登録処理
     local success = MySQL.insert.await([[
-        INSERT INTO qbx_driver_profiles (citizenid, driver_name, total_races, total_wins) 
-        VALUES (?, ?, 0, 0)
-    ]], {Player.PlayerData.citizenid, driverName})
+        INSERT INTO qbx_driver_profiles (citizenid, driver_name, total_races, total_wins, points) 
+        VALUES (?, ?, 0, 0, ?)
+    ]], {Player.PlayerData.citizenid, driverName, ToInteger(GetConfigValue('Ranking.startPoints', 1000)) or 1000})
     
     if success then
         TriggerClientEvent('ox_lib:notify', source, {
@@ -1532,7 +1535,13 @@ RegisterNetEvent('qbx_racing:server:finishMultiRace', function(sessionId, timeMs
             values = {position == 1 and 1 or 0, finisher.citizenid}
         }
     end
-    if not MySQL.transaction.await(finishQueries) then
+    local finishSaved = MySQL.transaction.await(finishQueries)
+    if finishSaved and Progression then
+        -- タイムアタックの目標タイム（最初の数回のゴールの平均）の計算
+        local ok, err = pcall(Progression.UpdateTargetTime, session.raceId)
+        if not ok then print('^1[CAM Racing]^7 目標タイムの計算に失敗しました: ' .. tostring(err)) end
+    end
+    if not finishSaved then
         -- 保存できなかった記録は、レース終了時の精算（賞金の記録と同じトランザクション）でもう一度保存する
         -- （そこでも保存できなければ賞金も確定しない）
         print(('^1[CAM Racing]^7 %s のゴール記録を保存できませんでした（session=%d、終了時に再保存します）'):format(
@@ -1604,6 +1613,11 @@ function CheckSessionComplete(sessionId)
     else
         session.prizesFailed = true
         print(('^1[CAM Racing]^7 セッション %d の結果を保存できなかったため、賞金を支払いませんでした（次回起動時に参加費を返金します）'):format(sessionId))
+    end
+    -- ランキング: 参加者同士のポイントのやり取り
+    if Progression then
+        local ok, err = pcall(Progression.ApplyMultiplayerRanking, session)
+        if not ok then print('^1[CAM Racing]^7 ランキングの更新に失敗しました: ' .. tostring(err)) end
     end
     BroadcastFinalResults(sessionId)
     
@@ -1718,6 +1732,13 @@ end)
 
 -- (FormatMoney はヘルパー関数セクションで定義済み)
 
+-- ランキングのポイント変動の表示（「 +10pt」など。変動なしは空）
+function FormatPointsDelta(delta)
+    delta = ToInteger(delta)
+    if not delta or delta == 0 then return '' end
+    return string.format(' [%s%dpt]', delta > 0 and '+' or '', delta)
+end
+
 -- 最終結果発表
 function BroadcastFinalResults(sessionId)
     local session = ActiveSessions[sessionId]
@@ -1745,10 +1766,11 @@ function BroadcastFinalResults(sessionId)
         local medal = medals[i] or (i .. '位')
         local time = participant.finishTime and string.format("%.2f秒", participant.finishTime / 1000) or 'DNF'
         local prize = participant.prize and string.format('（賞金 $%s）', FormatMoney(participant.prize)) or ''
-        summary = summary .. string.format('%s %s - %s%s\n', medal, participant.driverName, time, prize)
+        summary = summary .. string.format('%s %s - %s%s%s\n', medal, participant.driverName, time, prize,
+            FormatPointsDelta(participant.pointsDelta))
     end
     for _, participant in ipairs(retired) do
-        summary = summary .. string.format('DNF %s\n', participant.driverName)
+        summary = summary .. string.format('DNF %s%s\n', participant.driverName, FormatPointsDelta(participant.pointsDelta))
     end
     
     if session.isBetMode and session.prizePool > 0 then
@@ -1778,11 +1800,41 @@ end
 -- ソロレース完了処理
 
 -- ソロレース開始（GO の瞬間にクライアントから届く）
-RegisterNetEvent('qbx_racing:server:soloRaceStarted', function(raceId)
+-- mode: 'daily' ならデイリーレースとして走る（その日のデイリーで、報酬が残っている場合のみ）
+RegisterNetEvent('qbx_racing:server:soloRaceStarted', function(raceId, mode)
     local src = source
     raceId = ToInteger(raceId)
     if not raceId then return end
-    soloRuns[src] = {raceId = raceId, startedAt = GetGameTimer()}
+    local run = {raceId = raceId, startedAt = GetGameTimer(), daily = false}
+    soloRuns[src] = run
+    
+    if mode == 'daily' and Progression then
+        local Player = GetPlayer(src)
+        local ok, playable = pcall(Progression.IsDailyPlayable, Player and Player.PlayerData.citizenid, raceId)
+        if ok and playable then
+            run.daily = true
+        else
+            TriggerClientEvent('ox_lib:notify', src, {
+                title = 'デイリーレース',
+                description = '今日のデイリー報酬が残っていないため、通常の走行として記録します',
+                type = 'inform'
+            })
+        end
+    end
+end)
+
+-- ソロレースのリタイア（走行中のみ。ランキングのポイントが下がる）
+RegisterNetEvent('qbx_racing:server:soloRaceRetired', function(raceId)
+    local src = source
+    local run = soloRuns[src]
+    if not run or run.raceId ~= ToInteger(raceId) then return end
+    soloRuns[src] = nil
+    
+    local Player = GetPlayer(src)
+    if Player and Progression then
+        local ok, err = pcall(Progression.OnSoloRaceRetired, src, Player.PlayerData.citizenid, run.raceId)
+        if not ok then print('^1[CAM Racing]^7 リタイアの処理に失敗しました: ' .. tostring(err)) end
+    end
 end)
 
 RegisterNetEvent('qbx_racing:server:finishRace', function(raceId, timeMs, vehicleModel)
@@ -1800,7 +1852,7 @@ RegisterNetEvent('qbx_racing:server:finishRace', function(raceId, timeMs, vehicl
     if not profile then return end
     
     -- 削除済みのレースには記録しない
-    local race = MySQL.single.await('SELECT id, race_type, laps FROM qbx_races WHERE id = ? AND is_active = 1', {raceId})
+    local race = MySQL.single.await('SELECT id, name, race_type, laps, target_time_ms, ta_reward FROM qbx_races WHERE id = ? AND is_active = 1', {raceId})
     if not race then return end
     race.checkpoints = MySQL.query.await([[
         SELECT x, y, z, radius FROM qbx_race_checkpoints WHERE race_id = ? ORDER BY checkpoint_order ASC
@@ -1824,23 +1876,35 @@ RegisterNetEvent('qbx_racing:server:finishRace', function(raceId, timeMs, vehicl
         vehicleModel = '不明'
     end
     
-    -- タイム記録のみ
-    MySQL.insert.await([[
+    -- タイム記録
+    local timeSaved = MySQL.insert.await([[
         INSERT INTO qbx_race_times (race_id, driver_name, citizenid, time_ms, vehicle_model) 
         VALUES (?, ?, ?, ?, ?)
     ]], {raceId, profile.driver_name, Player.PlayerData.citizenid, timeMs, vehicleModel})
     
     -- 統計更新
-    if GetConfigValue('Race.updateStats', true) then
+    if timeSaved and GetConfigValue('Race.updateStats', true) then
         MySQL.query.await('UPDATE qbx_driver_profiles SET total_races = total_races + 1 WHERE citizenid = ?', {Player.PlayerData.citizenid})
     end
     
-    -- 通知（報酬なし）
-    local timeFormatted = string.format("%.2f秒", timeMs / 1000)
+    -- タイムアタック・デイリーの報酬とランキング（記録を保存できたときだけ）
+    local lines = {string.format('タイム: %.2f秒', timeMs / 1000)}
+    if not timeSaved then
+        lines[#lines + 1] = '⚠️ 記録を保存できませんでした'
+    elseif Progression then
+        local ok, result = pcall(Progression.OnSoloRaceFinished, src, Player.PlayerData.citizenid, race, timeMs, run.daily)
+        if ok then
+            for _, line in ipairs(result or {}) do lines[#lines + 1] = line end
+        else
+            print('^1[CAM Racing]^7 報酬・ランキングの処理に失敗しました: ' .. tostring(result))
+        end
+    end
+    
     TriggerClientEvent('ox_lib:notify', src, {
-        title = 'タイム記録完了',
-        description = timeFormatted .. '（練習モード - 報酬なし）',
-        type = 'inform'
+        title = '🏁 ゴール！ ' .. tostring(race.name or ''),
+        description = table.concat(lines, '\n'),
+        type = 'success',
+        duration = 12000
     })
     
     TriggerClientEvent('qbx_racing:client:updateRaces', -1)
@@ -2050,6 +2114,7 @@ local SCHEMA_TABLES = {
             `driver_name` VARCHAR(50) UNIQUE NOT NULL,
             `total_races` INT DEFAULT 0,
             `total_wins` INT DEFAULT 0,
+            `points` INT DEFAULT 1000,
             `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             INDEX `idx_driver_name` (`driver_name`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
@@ -2066,6 +2131,11 @@ local SCHEMA_TABLES = {
             `max_participants` INT DEFAULT 16,
             `creator_driver_name` VARCHAR(50),
             `is_active` TINYINT(1) DEFAULT 1,
+            `target_time_ms` INT NULL,
+            `ta_reward` INT NULL,
+            `ta_rate` INT NULL,
+            `ta_calib_after_id` INT DEFAULT 0,
+            `course_length_m` FLOAT NULL,
             `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             INDEX `idx_vehicle_type` (`vehicle_type`),
             INDEX `idx_race_type` (`race_type`),
@@ -2185,6 +2255,49 @@ local SCHEMA_TABLES = {
             INDEX `idx_unpaid` (`paid`),
             INDEX `idx_session` (`session_id`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ]],
+    [[
+        CREATE TABLE IF NOT EXISTS `qbx_ta_claims` (
+            `id` INT AUTO_INCREMENT PRIMARY KEY,
+            `citizenid` VARCHAR(50) NOT NULL,
+            `race_id` INT NOT NULL,
+            `time_ms` INT NOT NULL,
+            `reward` INT NOT NULL,
+            `claimed_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY `unique_claim` (`citizenid`, `race_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ]],
+    [[
+        CREATE TABLE IF NOT EXISTS `qbx_daily_races` (
+            `day` DATE NOT NULL,
+            `slot` INT NOT NULL,
+            `race_id` INT NOT NULL,
+            `target_time_ms` INT NOT NULL,
+            `reward` INT NOT NULL,
+            PRIMARY KEY (`day`, `slot`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ]],
+    [[
+        CREATE TABLE IF NOT EXISTS `qbx_daily_claims` (
+            `day` DATE NOT NULL,
+            `citizenid` VARCHAR(50) NOT NULL,
+            `race_id` INT NOT NULL,
+            `kind` VARCHAR(10) NOT NULL,
+            `amount` INT NOT NULL,
+            `claimed_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`day`, `citizenid`, `race_id`, `kind`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ]],
+    [[
+        CREATE TABLE IF NOT EXISTS `qbx_ranking_log` (
+            `id` INT AUTO_INCREMENT PRIMARY KEY,
+            `citizenid` VARCHAR(50) NOT NULL,
+            `delta` INT NOT NULL,
+            `reason` VARCHAR(50) NOT NULL,
+            `race_id` INT NULL,
+            `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX `idx_citizen_time` (`citizenid`, `created_at`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     ]]
 }
 
@@ -2201,7 +2314,15 @@ local SCHEMA_COLUMNS = {
     {'qbx_race_sessions', 'house_cut', "INT DEFAULT 0 AFTER `sponsor_name`"},
     {'qbx_session_participants', 'entry_paid', "TINYINT(1) DEFAULT 0 AFTER `final_position`"},
     {'qbx_session_participants', 'prize_amount', "INT DEFAULT 0 AFTER `entry_paid`"},
-    {'qbx_race_turn_guides', 'segments', "INT DEFAULT 1 AFTER `direction`"}
+    {'qbx_race_turn_guides', 'segments', "INT DEFAULT 1 AFTER `direction`"},
+    -- タイムアタック（目標タイム・報酬）
+    {'qbx_races', 'target_time_ms', "INT NULL"},
+    {'qbx_races', 'ta_reward', "INT NULL"},
+    {'qbx_races', 'ta_rate', "INT NULL"},
+    {'qbx_races', 'ta_calib_after_id', "INT DEFAULT 0"},
+    {'qbx_races', 'course_length_m', "FLOAT NULL"},
+    -- ランキングのポイント
+    {'qbx_driver_profiles', 'points', "INT DEFAULT 1000 AFTER `total_wins`"}
 }
 
 -- 1つずつ実行して、失敗したものはログに出して続ける。戻り値: すべて成功したら true
@@ -2393,3 +2514,17 @@ AddEventHandler('playerDropped', function(reason)
         end
     end
 end)
+
+-- ===================================
+-- server/progression.lua（タイムアタック・デイリー・ランキング）と共有する関数
+-- ===================================
+RacingServer = {
+    GetConfigValue = GetConfigValue,
+    FormatMoney = FormatMoney,
+    GetPlayer = GetPlayer,
+    ToInteger = ToInteger,
+    GetDriverProfile = GetDriverProfile,
+    HasRacePermission = HasRacePermission,
+    RecordPayouts = RecordPayouts,
+    SettlePayouts = SettlePayouts
+}

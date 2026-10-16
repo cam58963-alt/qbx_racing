@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS `qbx_driver_profiles` (
     `driver_name` VARCHAR(50) UNIQUE NOT NULL,
     `total_races` INT DEFAULT 0,
     `total_wins` INT DEFAULT 0,
+    `points` INT DEFAULT 1000,
     `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX `idx_driver_name` (`driver_name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -31,6 +32,11 @@ CREATE TABLE IF NOT EXISTS `qbx_races` (
     `max_participants` INT DEFAULT 16,
     `creator_driver_name` VARCHAR(50),
     `is_active` TINYINT(1) DEFAULT 1,
+    `target_time_ms` INT NULL,          -- タイムアタックの目標タイム（最初の数回のゴールの平均）
+    `ta_reward` INT NULL,               -- タイムアタックの報酬額
+    `ta_rate` INT NULL,                 -- 報酬レート
+    `ta_calib_after_id` INT DEFAULT 0,  -- 目標タイムの計算に使う記録の起点（リセット時に更新）
+    `course_length_m` FLOAT NULL,       -- コースの長さ（m）
     `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX `idx_vehicle_type` (`vehicle_type`),
     INDEX `idx_race_type` (`race_type`),
@@ -158,6 +164,49 @@ CREATE TABLE IF NOT EXISTS `qbx_race_payouts` (
     INDEX `idx_session` (`session_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- タイムアタックの報酬受け取り（1人1レース1回）
+CREATE TABLE IF NOT EXISTS `qbx_ta_claims` (
+    `id` INT AUTO_INCREMENT PRIMARY KEY,
+    `citizenid` VARCHAR(50) NOT NULL,
+    `race_id` INT NOT NULL,
+    `time_ms` INT NOT NULL,
+    `reward` INT NOT NULL,
+    `claimed_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY `unique_claim` (`citizenid`, `race_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- その日のデイリーレース（サーバー共通。目標タイムと報酬は選んだ時点の値で固定）
+CREATE TABLE IF NOT EXISTS `qbx_daily_races` (
+    `day` DATE NOT NULL,
+    `slot` INT NOT NULL,
+    `race_id` INT NOT NULL,
+    `target_time_ms` INT NOT NULL,
+    `reward` INT NOT NULL,
+    PRIMARY KEY (`day`, `slot`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- デイリーレースの報酬受け取り（kind = finish: 完走分 / target: 目標タイム分。それぞれ1日1回）
+CREATE TABLE IF NOT EXISTS `qbx_daily_claims` (
+    `day` DATE NOT NULL,
+    `citizenid` VARCHAR(50) NOT NULL,
+    `race_id` INT NOT NULL,
+    `kind` VARCHAR(10) NOT NULL,
+    `amount` INT NOT NULL,
+    `claimed_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`day`, `citizenid`, `race_id`, `kind`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ランキングのポイント変動履歴
+CREATE TABLE IF NOT EXISTS `qbx_ranking_log` (
+    `id` INT AUTO_INCREMENT PRIMARY KEY,
+    `citizenid` VARCHAR(50) NOT NULL,
+    `delta` INT NOT NULL,
+    `reason` VARCHAR(50) NOT NULL,
+    `race_id` INT NULL,
+    `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX `idx_citizen_time` (`citizenid`, `created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 
 -- ===================================
 -- v4.0以前 → v4.2.0 マイグレーション
@@ -212,6 +261,14 @@ ALTER TABLE `qbx_session_participants` MODIFY COLUMN `status`
 
 -- qbx_race_turn_guides: 横に長いガイド（並べる矢印の数）
 CALL qbx_racing_safe_add_column('qbx_race_turn_guides', 'segments', 'INT DEFAULT 1 AFTER `direction`');
+
+-- タイムアタック・ランキング
+CALL qbx_racing_safe_add_column('qbx_races', 'target_time_ms', 'INT NULL');
+CALL qbx_racing_safe_add_column('qbx_races', 'ta_reward', 'INT NULL');
+CALL qbx_racing_safe_add_column('qbx_races', 'ta_rate', 'INT NULL');
+CALL qbx_racing_safe_add_column('qbx_races', 'ta_calib_after_id', 'INT DEFAULT 0');
+CALL qbx_racing_safe_add_column('qbx_races', 'course_length_m', 'FLOAT NULL');
+CALL qbx_racing_safe_add_column('qbx_driver_profiles', 'points', 'INT DEFAULT 1000 AFTER `total_wins`');
 
 -- プロシージャ削除（後片付け）
 DROP PROCEDURE IF EXISTS `qbx_racing_safe_add_column`;
