@@ -136,8 +136,11 @@ function Progression.UpdateTargetTime(raceId)
     if not race or race.target_time_ms then return nil end
 
     local runs = GetCalibrationRuns()
+    -- サーバーで測った経過時間を使う（クライアントの申告タイムは許容範囲内でずらせるため）
+    -- server_time_ms の無い古い記録は数えない
     local rows = MySQL.query.await([[
-        SELECT time_ms FROM qbx_race_times WHERE race_id = ? AND id > ? ORDER BY id ASC LIMIT ?
+        SELECT server_time_ms AS time_ms FROM qbx_race_times
+        WHERE race_id = ? AND id > ? AND server_time_ms IS NOT NULL ORDER BY id ASC LIMIT ?
     ]], {raceId, ToInteger(race.ta_calib_after_id) or 0, runs}) or {}
     if #rows < runs then return nil end
 
@@ -167,7 +170,7 @@ end
 local function CalibrationCount(raceId)
     return tonumber(MySQL.scalar.await([[
         SELECT COUNT(*) FROM qbx_race_times t JOIN qbx_races r ON r.id = t.race_id
-        WHERE t.race_id = ? AND t.id > r.ta_calib_after_id
+        WHERE t.race_id = ? AND t.id > r.ta_calib_after_id AND t.server_time_ms IS NOT NULL
     ]], {raceId})) or 0
 end
 
@@ -482,17 +485,38 @@ function Progression.BuildMultiplayerRanking(session)
         end
     end
     
+    -- 保存は「渡す側の持ち点をロックして読み、その範囲で渡す」をトランザクションの中で1組ずつ行う
+    -- （計算後に別の処理で持ち点が減っていても、無いポイントを渡して増やさないように）
+    -- 上の計算は表示用の見込み（同時に持ち点が変わらなければ保存される値と同じ）
     local queries, deltas = {}, {}
-    for _, entrant in ipairs(entrants) do
+    local function add(sql, values)
+        queries[#queries + 1] = {query = sql, values = values or {}}
+    end
+    for i in ipairs(entrants) do
+        add(('SET @qbx_rk_%d = 0'):format(i))
+    end
+    for i, winner in ipairs(entrants) do
+        for j = i + 1, #entrants do
+            local loser = entrants[j]
+            if winner.order < loser.order then
+                add('SET @qbx_rk_balance = 0')
+                add('SELECT points INTO @qbx_rk_balance FROM qbx_driver_profiles WHERE citizenid = ? FOR UPDATE',
+                    {loser.participant.citizenid})
+                add('SET @qbx_rk_amount = LEAST(?, GREATEST(@qbx_rk_balance, 0))', {perOpponent})
+                add('UPDATE qbx_driver_profiles SET points = points - @qbx_rk_amount WHERE citizenid = ?',
+                    {loser.participant.citizenid})
+                add('UPDATE qbx_driver_profiles SET points = points + @qbx_rk_amount WHERE citizenid = ?',
+                    {winner.participant.citizenid})
+                add(('SET @qbx_rk_%d = @qbx_rk_%d - @qbx_rk_amount'):format(j, j))
+                add(('SET @qbx_rk_%d = @qbx_rk_%d + @qbx_rk_amount'):format(i, i))
+            end
+        end
+    end
+    for i, entrant in ipairs(entrants) do
+        add(([[INSERT INTO qbx_ranking_log (citizenid, delta, reason, race_id)
+               SELECT ?, @qbx_rk_%d, 'multi', ? FROM DUAL WHERE @qbx_rk_%d <> 0]]):format(i, i),
+            {entrant.participant.citizenid, session.raceId})
         if entrant.delta ~= 0 then
-            queries[#queries + 1] = {
-                query = 'UPDATE qbx_driver_profiles SET points = GREATEST(0, points + ?) WHERE citizenid = ?',
-                values = {entrant.delta, entrant.participant.citizenid}
-            }
-            queries[#queries + 1] = {
-                query = 'INSERT INTO qbx_ranking_log (citizenid, delta, reason, race_id) VALUES (?, ?, ?, ?)',
-                values = {entrant.participant.citizenid, entrant.delta, 'multi', session.raceId}
-            }
             deltas[entrant.participant] = entrant.delta
         end
     end
@@ -596,7 +620,7 @@ lib.callback.register('qbx_racing:getTimeAttack', function(source)
         return MySQL.query.await([[
             SELECT r.id, r.name, r.vehicle_type, r.race_type, r.laps,
                    r.target_time_ms, r.ta_reward, r.ta_rate, r.course_length_m,
-                   (SELECT COUNT(*) FROM qbx_race_times t WHERE t.race_id = r.id AND t.id > r.ta_calib_after_id) AS calib_count,
+                   (SELECT COUNT(*) FROM qbx_race_times t WHERE t.race_id = r.id AND t.id > r.ta_calib_after_id AND t.server_time_ms IS NOT NULL) AS calib_count,
                    (SELECT MIN(time_ms) FROM qbx_race_times t WHERE t.race_id = r.id AND t.citizenid = ?) AS my_best,
                    (SELECT time_ms FROM qbx_ta_claims c WHERE c.race_id = r.id AND c.citizenid = ?) AS claimed_time
             FROM qbx_races r

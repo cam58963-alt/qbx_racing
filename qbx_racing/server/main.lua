@@ -1555,8 +1555,8 @@ RegisterNetEvent('qbx_racing:server:finishMultiRace', function(sessionId, timeMs
             values = {timeMs, position, sessionId, finisher.citizenid}
         },
         {
-            query = 'INSERT INTO qbx_race_times (race_id, driver_name, citizenid, time_ms, vehicle_model) VALUES (?, ?, ?, ?, ?)',
-            values = {session.raceId, finisher.driverName, finisher.citizenid, timeMs, vehicleModel}
+            query = 'INSERT INTO qbx_race_times (race_id, driver_name, citizenid, time_ms, server_time_ms, vehicle_model) VALUES (?, ?, ?, ?, ?, ?)',
+            values = {session.raceId, finisher.driverName, finisher.citizenid, timeMs, serverElapsed, vehicleModel}
         }
     }
     if GetConfigValue('Race.updateStats', true) then
@@ -1993,9 +1993,9 @@ RegisterNetEvent('qbx_racing:server:finishRace', function(raceId, timeMs, vehicl
     
     -- タイム記録
     local timeSaved = MySQL.insert.await([[
-        INSERT INTO qbx_race_times (race_id, driver_name, citizenid, time_ms, vehicle_model) 
-        VALUES (?, ?, ?, ?, ?)
-    ]], {raceId, profile.driver_name, Player.PlayerData.citizenid, timeMs, vehicleModel})
+        INSERT INTO qbx_race_times (race_id, driver_name, citizenid, time_ms, server_time_ms, vehicle_model) 
+        VALUES (?, ?, ?, ?, ?, ?)
+    ]], {raceId, profile.driver_name, Player.PlayerData.citizenid, timeMs, serverElapsed, vehicleModel})
     
     -- 統計更新
     if timeSaved and GetConfigValue('Race.updateStats', true) then
@@ -2292,6 +2292,7 @@ local SCHEMA_TABLES = {
             `driver_name` VARCHAR(50) NOT NULL,
             `citizenid` VARCHAR(50) NOT NULL,
             `time_ms` INT NOT NULL,
+            `server_time_ms` INT NULL,
             `vehicle_model` VARCHAR(50) NOT NULL,
             `completed_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             INDEX `idx_race_time` (`race_id`, `time_ms`),
@@ -2433,7 +2434,8 @@ local SCHEMA_COLUMNS = {
     {'qbx_session_participants', 'entry_paid', "TINYINT(1) DEFAULT 0 AFTER `final_position`"},
     {'qbx_session_participants', 'prize_amount', "INT DEFAULT 0 AFTER `entry_paid`"},
     {'qbx_race_turn_guides', 'segments', "INT DEFAULT 1 AFTER `direction`"},
-    -- タイムアタック（目標タイム・報酬）
+    -- タイムアタック（目標タイム・報酬）。目標タイムはサーバーで測った経過時間から計算する
+    {'qbx_race_times', 'server_time_ms', "INT NULL AFTER `time_ms`"},
     {'qbx_races', 'target_time_ms', "INT NULL"},
     {'qbx_races', 'ta_reward', "INT NULL"},
     {'qbx_races', 'ta_rate', "INT NULL"},

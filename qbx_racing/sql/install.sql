@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS `qbx_race_times` (
     `driver_name` VARCHAR(50) NOT NULL,
     `citizenid` VARCHAR(50) NOT NULL,
     `time_ms` INT NOT NULL,
+    `server_time_ms` INT NULL,          -- サーバーで測った経過時間（目標タイムの計算に使う）
     `vehicle_model` VARCHAR(50) NOT NULL,
     `completed_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (`race_id`) REFERENCES `qbx_races`(`id`) ON DELETE CASCADE,
@@ -263,6 +264,7 @@ ALTER TABLE `qbx_session_participants` MODIFY COLUMN `status`
 CALL qbx_racing_safe_add_column('qbx_race_turn_guides', 'segments', 'INT DEFAULT 1 AFTER `direction`');
 
 -- タイムアタック・ランキング
+CALL qbx_racing_safe_add_column('qbx_race_times', 'server_time_ms', 'INT NULL AFTER `time_ms`');
 CALL qbx_racing_safe_add_column('qbx_races', 'target_time_ms', 'INT NULL');
 CALL qbx_racing_safe_add_column('qbx_races', 'ta_reward', 'INT NULL');
 CALL qbx_racing_safe_add_column('qbx_races', 'ta_rate', 'INT NULL');
