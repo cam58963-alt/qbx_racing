@@ -60,7 +60,6 @@ CREATE TABLE IF NOT EXISTS `qbx_race_turn_guides` (
     `z` DOUBLE NOT NULL,
     `direction` ENUM('left', 'right') NOT NULL,
     `segments` INT DEFAULT 1,
-    FOREIGN KEY (`race_id`) REFERENCES `qbx_races`(`id`) ON DELETE CASCADE,
     INDEX `idx_race_guide` (`race_id`, `checkpoint_order`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 

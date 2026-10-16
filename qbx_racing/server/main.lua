@@ -2038,95 +2038,119 @@ AddEventHandler(((Config.UI and Config.UI.tablet and Config.UI.tablet.resource) 
 
 CreateThread(RegisterTabletApp)
 
+-- 起動時の処理を1つずつ実行する（1つが失敗しても残りは続ける）
+local function RunStartupStep(name, fn)
+    local ok, err = pcall(fn)
+    if not ok then
+        print(('^1[CAM Racing]^7 起動処理「%s」に失敗しました: %s'):format(name, tostring(err)))
+    end
+    return ok
+end
+
 AddEventHandler('onResourceStart', function(resourceName)
     if GetCurrentResourceName() ~= resourceName then return end
     
     print('^2[CAM Racing]^7 サーバーサイド起動完了')
     
     -- 曲がり角ガイドのテーブルを作成（既存サーバー向け）
-    MySQL.query.await([[
-        CREATE TABLE IF NOT EXISTS `qbx_race_turn_guides` (
-            `id` INT AUTO_INCREMENT PRIMARY KEY,
-            `race_id` INT NOT NULL,
-            `checkpoint_order` INT NOT NULL,
-            `x` DOUBLE NOT NULL,
-            `y` DOUBLE NOT NULL,
-            `z` DOUBLE NOT NULL,
-            `direction` ENUM('left', 'right') NOT NULL,
-            `segments` INT DEFAULT 1,
-            FOREIGN KEY (`race_id`) REFERENCES `qbx_races`(`id`) ON DELETE CASCADE,
-            INDEX `idx_race_guide` (`race_id`, `checkpoint_order`)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    ]])
+    -- ※ 外部キーは付けない（既存の qbx_races の id の型が違うサーバーで作成に失敗するため。
+    --   レースは論理削除（is_active = 0）なので、ガイドが残っても困らない）
+    RunStartupStep('曲がり角ガイドのテーブル作成', function()
+        MySQL.query.await([[
+            CREATE TABLE IF NOT EXISTS `qbx_race_turn_guides` (
+                `id` INT AUTO_INCREMENT PRIMARY KEY,
+                `race_id` INT NOT NULL,
+                `checkpoint_order` INT NOT NULL,
+                `x` DOUBLE NOT NULL,
+                `y` DOUBLE NOT NULL,
+                `z` DOUBLE NOT NULL,
+                `direction` ENUM('left', 'right') NOT NULL,
+                `segments` INT DEFAULT 1,
+                INDEX `idx_race_guide` (`race_id`, `checkpoint_order`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ]])
+        
+        -- 横に長いガイド用の列（このテーブルを先に作った既存サーバー向け）
+        local hasSegments = MySQL.scalar.await([[
+            SELECT COUNT(*) FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'qbx_race_turn_guides' AND COLUMN_NAME = 'segments'
+        ]])
+        if tonumber(hasSegments) == 0 then
+            MySQL.query.await('ALTER TABLE `qbx_race_turn_guides` ADD COLUMN `segments` INT DEFAULT 1 AFTER `direction`')
+        end
+    end)
     
-    -- 横に長いガイド用の列（このテーブルを先に作った既存サーバー向け）
-    local hasSegments = MySQL.scalar.await([[
-        SELECT COUNT(*) FROM information_schema.COLUMNS
-        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'qbx_race_turn_guides' AND COLUMN_NAME = 'segments'
-    ]])
-    if tonumber(hasSegments) == 0 then
-        MySQL.query.await('ALTER TABLE `qbx_race_turn_guides` ADD COLUMN `segments` INT DEFAULT 1 AFTER `direction`')
-    end
     -- 参加者ステータスにリタイア・対象外を追加（既存サーバー向け）
-    local statusType = MySQL.scalar.await([[
-        SELECT COLUMN_TYPE FROM information_schema.COLUMNS
-        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'qbx_session_participants' AND COLUMN_NAME = 'status'
-    ]])
-    if statusType and not tostring(statusType):find('retired', 1, true) then
-        MySQL.query.await([[ALTER TABLE `qbx_session_participants` MODIFY COLUMN `status`
-            ENUM('entered', 'ready', 'racing', 'finished', 'retired', 'excluded') DEFAULT 'entered']])
-    end
+    RunStartupStep('参加者ステータスの更新', function()
+        local statusType = MySQL.scalar.await([[
+            SELECT COLUMN_TYPE FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'qbx_session_participants' AND COLUMN_NAME = 'status'
+        ]])
+        if statusType and not tostring(statusType):find('retired', 1, true) then
+            MySQL.query.await([[ALTER TABLE `qbx_session_participants` MODIFY COLUMN `status`
+                ENUM('entered', 'ready', 'racing', 'finished', 'retired', 'excluded') DEFAULT 'entered']])
+        end
+    end)
     print('^2[CAM Racing]^7 マルチプレイヤーシステム: ' .. 
           (Config.Multiplayer and Config.Multiplayer.enabled and '有効' or '無効'))
     
     -- 支払い台帳（返金・賞金を確実に1回だけ払うため）
-    MySQL.query.await([[
-        CREATE TABLE IF NOT EXISTS `qbx_race_payouts` (
-            `id` INT AUTO_INCREMENT PRIMARY KEY,
-            `session_id` INT NOT NULL,
-            `citizenid` VARCHAR(50) NOT NULL,
-            `amount` INT NOT NULL,
-            `reason` VARCHAR(50) NOT NULL,
-            `paid` TINYINT(1) DEFAULT 0,
-            `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            INDEX `idx_unpaid` (`paid`),
-            INDEX `idx_session` (`session_id`)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    ]])
+    local ledgerReady = RunStartupStep('支払い台帳のテーブル作成', function()
+        MySQL.query.await([[
+            CREATE TABLE IF NOT EXISTS `qbx_race_payouts` (
+                `id` INT AUTO_INCREMENT PRIMARY KEY,
+                `session_id` INT NOT NULL,
+                `citizenid` VARCHAR(50) NOT NULL,
+                `amount` INT NOT NULL,
+                `reason` VARCHAR(50) NOT NULL,
+                `paid` TINYINT(1) DEFAULT 0,
+                `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                INDEX `idx_unpaid` (`paid`),
+                INDEX `idx_session` (`session_id`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ]])
+    end)
     
     -- 前回サーバーが落ちたときに終わっていなかったセッション →
     -- 参加費（支払い済みの記録がある分）とスポンサー金（スポンサー履歴がある分）の返金予定を記録して中止にする
-    local staleSessions = MySQL.query.await([[
-        SELECT id, entry_fee FROM qbx_race_sessions WHERE status IN ('lobby', 'countdown', 'racing')
-    ]]) or {}
-    for _, stale in ipairs(staleSessions) do
-        local payouts = {}
-        local entryFee = ToInteger(stale.entry_fee) or 0
-        if entryFee > 0 then
-            local paid = MySQL.query.await([[
-                SELECT citizenid FROM qbx_session_participants WHERE session_id = ? AND entry_paid = 1
-            ]], {stale.id}) or {}
-            for _, row in ipairs(paid) do
-                payouts[#payouts + 1] = {citizenid = row.citizenid, amount = entryFee, reason = 'race-entry-refund'}
+    -- （台帳が無いと返金予定を残せないので、その場合はセッションも中止にせず次回起動時に任せる）
+    if ledgerReady then
+        RunStartupStep('前回終わっていなかったセッションの返金', function()
+            local staleSessions = MySQL.query.await([[
+                SELECT id, entry_fee FROM qbx_race_sessions WHERE status IN ('lobby', 'countdown', 'racing')
+            ]]) or {}
+            for _, stale in ipairs(staleSessions) do
+                local payouts = {}
+                local entryFee = ToInteger(stale.entry_fee) or 0
+                if entryFee > 0 then
+                    local paid = MySQL.query.await([[
+                        SELECT citizenid FROM qbx_session_participants WHERE session_id = ? AND entry_paid = 1
+                    ]], {stale.id}) or {}
+                    for _, row in ipairs(paid) do
+                        payouts[#payouts + 1] = {citizenid = row.citizenid, amount = entryFee, reason = 'race-entry-refund'}
+                    end
+                end
+                local sponsors = MySQL.query.await([[
+                    SELECT sponsor_citizenid, SUM(amount) AS amount FROM qbx_race_sponsors
+                    WHERE session_id = ? AND sponsor_type = 'host' GROUP BY sponsor_citizenid
+                ]], {stale.id}) or {}
+                for _, row in ipairs(sponsors) do
+                    payouts[#payouts + 1] = {citizenid = row.sponsor_citizenid, amount = row.amount, reason = 'race-sponsor-refund'}
+                end
+                
+                if not RecordPayouts(stale.id, payouts, {
+                    {query = "UPDATE qbx_race_sessions SET status = 'cancelled' WHERE id = ? AND status IN ('lobby', 'countdown', 'racing')", values = {stale.id}}
+                }) then
+                    print(('^1[CAM Racing]^7 セッション %d の返金予定を記録できませんでした（次回起動時に再試行します）'):format(stale.id))
+                end
             end
-        end
-        local sponsors = MySQL.query.await([[
-            SELECT sponsor_citizenid, SUM(amount) AS amount FROM qbx_race_sponsors
-            WHERE session_id = ? AND sponsor_type = 'host' GROUP BY sponsor_citizenid
-        ]], {stale.id}) or {}
-        for _, row in ipairs(sponsors) do
-            payouts[#payouts + 1] = {citizenid = row.sponsor_citizenid, amount = row.amount, reason = 'race-sponsor-refund'}
-        end
+        end)
         
-        if not RecordPayouts(stale.id, payouts, {
-            {query = "UPDATE qbx_race_sessions SET status = 'cancelled' WHERE id = ? AND status IN ('lobby', 'countdown', 'racing')", values = {stale.id}}
-        }) then
-            print(('^1[CAM Racing]^7 セッション %d の返金予定を記録できませんでした（次回起動時に再試行します）'):format(stale.id))
-        end
+        -- 未払いの返金・賞金をすべて支払う（前回の途中で止まった分も含む）
+        RunStartupStep('未払いの返金・賞金の支払い', function()
+            SettlePayouts(nil)
+        end)
     end
-    
-    -- 未払いの返金・賞金をすべて支払う（前回の途中で止まった分も含む）
-    SettlePayouts(nil)
     ActiveSessions = {}
     
     -- セッションタイムアウト管理スレッド開始
