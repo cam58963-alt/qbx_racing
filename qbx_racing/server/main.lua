@@ -197,6 +197,22 @@ local function CalculateMinRaceTimeMs(race)
     return math.floor(total / maxSpeed * 1000)
 end
 
+-- サーバーで見たプレイヤーの位置がチェックポイントの近くか（OneSync が無く位置が取れない場合は確認しない）
+local function IsPlayerNearCheckpoint(src, cp)
+    if not cp then return false end
+    local ped = GetPlayerPed(src)
+    if not ped or ped == 0 then return true end
+    local coords = GetEntityCoords(ped)
+    if coords.x == 0.0 and coords.y == 0.0 and coords.z == 0.0 then return true end
+    local allowed = (tonumber(cp.radius) or 10.0) + GetConfigValue('Security.antiCheat.progressDistanceMargin', 100.0)
+    return #(coords - vector3(cp.x, cp.y, cp.z)) <= allowed
+end
+
+-- コース上の位置 index のチェックポイント（周回の index n+1 はスタート地点 = CP1）
+local function CourseCheckpointAt(checkpoints, index)
+    return checkpoints[index] or checkpoints[1]
+end
+
 -- 曲がり角ガイド取得（手動設置分）
 local function GetRaceTurnGuides(raceId)
     return MySQL.query.await([[
@@ -1458,17 +1474,22 @@ RegisterNetEvent('qbx_racing:server:updateProgress', function(sessionId, checkpo
     
     -- チェックポイントは1つずつ順番にしか進めない（飛ばした報告は受け付けない）
     -- 周回は CPn の次に n+1（スタート地点に戻る）、そこを通ると次の周の CP2
-    local nextCheckpoint, nextLap
+    local passedIndex, nextCheckpoint, nextLap
     if participant.currentCheckpoint < session.lapEndIndex then
-        nextCheckpoint, nextLap = participant.currentCheckpoint + 1, participant.currentLap
+        passedIndex, nextCheckpoint, nextLap = participant.currentCheckpoint, participant.currentCheckpoint + 1, participant.currentLap
     else
-        nextCheckpoint, nextLap = 2, participant.currentLap + 1
+        passedIndex, nextCheckpoint, nextLap = session.lapEndIndex, 2, participant.currentLap + 1
     end
+    if checkpoint ~= nextCheckpoint or lap ~= nextLap or lap > session.totalLaps then return end
     
-    if checkpoint == nextCheckpoint and lap == nextLap and lap <= session.totalLaps then
-        participant.currentCheckpoint = checkpoint
-        participant.currentLap = lap
+    -- 通過したチェックポイントの近くにいること（サーバーで見た位置で確認）
+    if not IsPlayerNearCheckpoint(src, CourseCheckpointAt(session.race.checkpoints or {}, passedIndex)) then
+        print(('^3[CAM Racing]^7 チェックポイント通過を受け付けませんでした（位置が離れています）: %s session=%d CP=%d'):format(
+            participant.driverName, sessionId, passedIndex))
+        return
     end
+    participant.currentCheckpoint = checkpoint
+    participant.currentLap = lap
 end)
 
 -- ===================================
@@ -1484,7 +1505,8 @@ RegisterNetEvent('qbx_racing:server:finishMultiRace', function(sessionId, timeMs
     if not finisher or finisher.status ~= 'racing' then return end
     
     -- 最終周のゴール直前まで順番に通過したか（サーバーが受け取った進捗で確認。ゴールの通過はこの報告自体）
-    if finisher.currentLap ~= session.totalLaps or finisher.currentCheckpoint ~= session.lapEndIndex then
+    if finisher.currentLap ~= session.totalLaps or finisher.currentCheckpoint ~= session.lapEndIndex
+        or not IsPlayerNearCheckpoint(src, CourseCheckpointAt(session.race.checkpoints or {}, session.lapEndIndex)) then
         print(('^3[CAM Racing]^7 ゴールを受け付けませんでした（チェックポイント未通過）: %s session=%d'):format(
             finisher.driverName, sessionId))
         return
@@ -1607,17 +1629,27 @@ function CheckSessionComplete(sessionId)
     for _, query in ipairs(session.pendingFinishQueries or {}) do
         table.insert(extraQueries, query)
     end
+    -- ランキング: 参加者同士のポイントのやり取りも同じトランザクションで保存する
+    -- （結果が保存できなかったレースはポイントも動かない）
+    local rankingDeltas = {}
+    if Progression then
+        local ok, queries, deltas = pcall(Progression.BuildMultiplayerRanking, session)
+        if ok then
+            for _, query in ipairs(queries or {}) do table.insert(extraQueries, query) end
+            rankingDeltas = deltas or {}
+        else
+            print('^1[CAM Racing]^7 ランキングの計算に失敗しました: ' .. tostring(queries))
+        end
+    end
     if RecordPayouts(sessionId, payouts, extraQueries) then
+        for participant, delta in pairs(rankingDeltas) do
+            participant.pointsDelta = delta
+        end
         SettlePayouts(sessionId, SessionSources(session))
         PayHouseCut(session)
     else
         session.prizesFailed = true
         print(('^1[CAM Racing]^7 セッション %d の結果を保存できなかったため、賞金を支払いませんでした（次回起動時に参加費を返金します）'):format(sessionId))
-    end
-    -- ランキング: 参加者同士のポイントのやり取り
-    if Progression then
-        local ok, err = pcall(Progression.ApplyMultiplayerRanking, session)
-        if not ok then print('^1[CAM Racing]^7 ランキングの更新に失敗しました: ' .. tostring(err)) end
     end
     BroadcastFinalResults(sessionId)
     
@@ -1799,20 +1831,9 @@ end
 
 -- ソロレース完了処理
 
--- サーバーで見たプレイヤーの位置がチェックポイントの近くか（OneSync が無く位置が取れない場合は確認しない）
-local function IsPlayerNearCheckpoint(src, cp)
-    if not cp then return false end
-    local ped = GetPlayerPed(src)
-    if not ped or ped == 0 then return true end
-    local coords = GetEntityCoords(ped)
-    if coords.x == 0.0 and coords.y == 0.0 and coords.z == 0.0 then return true end
-    local allowed = (tonumber(cp.radius) or 10.0) + GetConfigValue('Security.antiCheat.progressDistanceMargin', 100.0)
-    return #(coords - vector3(cp.x, cp.y, cp.z)) <= allowed
-end
-
 -- ソロのコース上の位置 index のチェックポイント（周回の index n+1 はスタート地点 = CP1）
 local function SoloCheckpointAt(run, index)
-    return run.checkpoints[index] or run.checkpoints[1]
+    return CourseCheckpointAt(run.checkpoints, index)
 end
 
 -- ソロレース開始（GO の瞬間にクライアントから届く）

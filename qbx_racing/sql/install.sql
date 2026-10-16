@@ -268,7 +268,7 @@ CALL qbx_racing_safe_add_column('qbx_races', 'ta_reward', 'INT NULL');
 CALL qbx_racing_safe_add_column('qbx_races', 'ta_rate', 'INT NULL');
 CALL qbx_racing_safe_add_column('qbx_races', 'ta_calib_after_id', 'INT DEFAULT 0');
 CALL qbx_racing_safe_add_column('qbx_races', 'course_length_m', 'FLOAT NULL');
-CALL qbx_racing_safe_add_column('qbx_driver_profiles', 'points', 'INT DEFAULT 1000 AFTER `total_wins`');
+-- qbx_driver_profiles.points はリソース起動時に追加される（既存のプロフィールを Config.Ranking.startPoints で埋めるため、ここでは追加しない）
 
 -- プロシージャ削除（後片付け）
 DROP PROCEDURE IF EXISTS `qbx_racing_safe_add_column`;

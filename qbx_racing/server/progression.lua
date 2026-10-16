@@ -442,10 +442,11 @@ end
 -- （リタイアはゴールした人より下、リタイア同士は同順位でやり取りなし）
 -- 渡す側の持ち点が足りない分は受け取れない（ポイントの合計は増えも減りもしない）
 -- ===================================
-function Progression.ApplyMultiplayerRanking(session)
-    if not RankingEnabled() then return end
+-- 戻り値: 保存するクエリ（セッション終了のトランザクションに含める）, 参加者 → ポイント変動
+function Progression.BuildMultiplayerRanking(session)
+    if not RankingEnabled() then return {}, {} end
     local perOpponent = ToInteger(GetConfigValue('Ranking.multiplayer.pointsPerOpponent', 5)) or 0
-    if perOpponent <= 0 then return end
+    if perOpponent <= 0 then return {}, {} end
     
     local entrants = {}
     for _, participant in ipairs(session.participants) do
@@ -462,7 +463,7 @@ function Progression.ApplyMultiplayerRanking(session)
             end
         end
     end
-    if #entrants < 2 then return end
+    if #entrants < 2 then return {}, {} end
     
     -- 上の順位から順に、下の順位の人から持ち点の範囲で受け取る
     table.sort(entrants, function(a, b) return a.order < b.order end)
@@ -481,8 +482,7 @@ function Progression.ApplyMultiplayerRanking(session)
         end
     end
     
-    -- 全員分をまとめて保存（途中で失敗して片方だけ動くことがないように）
-    local queries = {}
+    local queries, deltas = {}, {}
     for _, entrant in ipairs(entrants) do
         if entrant.delta ~= 0 then
             queries[#queries + 1] = {
@@ -493,14 +493,10 @@ function Progression.ApplyMultiplayerRanking(session)
                 query = 'INSERT INTO qbx_ranking_log (citizenid, delta, reason, race_id) VALUES (?, ?, ?, ?)',
                 values = {entrant.participant.citizenid, entrant.delta, 'multi', session.raceId}
             }
+            deltas[entrant.participant] = entrant.delta
         end
     end
-    if #queries == 0 or not MySQL.transaction.await(queries) then return end
-    for _, entrant in ipairs(entrants) do
-        if entrant.delta ~= 0 then
-            entrant.participant.pointsDelta = entrant.delta
-        end
-    end
+    return queries, deltas
 end
 
 -- ===================================
