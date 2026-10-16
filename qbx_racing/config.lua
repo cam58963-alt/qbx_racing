@@ -70,7 +70,9 @@ Config.VehicleTypes = {
         -- 0: Compacts, 1: Sedans, 2: SUVs, 3: Coupes, 4: Muscle, 5: Sports Classics
         -- 6: Sports, 7: Super, 8: Motorcycles, 9: Off-road, 10: Industrial
         -- 11: Utility, 12: Vans, 17: Service, 18: Emergency, 19: Military, 20: Commercial
-        allowedClasses = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 17, 18, 19, 20}
+        allowedClasses = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 17, 18, 19, 20},
+        -- サーバーで確認する車両の種類（GetVehicleType。細かいクラスはクライアントで確認）
+        serverTypes = {'automobile', 'bike'}
     },
     
     heli = {
@@ -96,7 +98,8 @@ Config.VehicleTypes = {
         allowedClasses = {
             15, -- Helicopters
             16  -- Planes
-        }
+        },
+        serverTypes = {'heli', 'plane'}
     },
     
     boat = {
@@ -121,7 +124,8 @@ Config.VehicleTypes = {
         
         allowedClasses = {
             14  -- Boats
-        }
+        },
+        serverTypes = {'boat', 'submarine'}
     }
 }
 

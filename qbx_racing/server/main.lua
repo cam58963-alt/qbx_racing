@@ -1844,6 +1844,38 @@ local function SoloCheckpointAt(run, index)
     return CourseCheckpointAt(run.checkpoints, index)
 end
 
+-- サーバーから見たプレイヤーの車両（位置が取れない環境では false = 確認しない、乗っていなければ 0）
+local function GetServerPlayerVehicle(src)
+    local ped = GetPlayerPed(src)
+    if not ped or ped == 0 then return false end
+    return GetVehiclePedIsIn(ped, false)
+end
+
+-- サーバーで分かる車両の種類（GetVehicleType）がレースの車両タイプに合うか
+-- （細かいクラスはサーバーでは取れないので、車のコースを飛行機で走るような違いを防ぐ）
+local DEFAULT_SERVER_VEHICLE_TYPES = {
+    car = {'automobile', 'bike'},
+    heli = {'heli', 'plane'},
+    boat = {'boat', 'submarine'}
+}
+local function IsServerVehicleAllowed(vehicle, raceVehicleType)
+    if not vehicle or vehicle == 0 then return false end
+    local vehicleType = GetVehicleType(vehicle)
+    if not vehicleType then return true end -- 種類が取れない場合は確認しない
+    local allowed = GetConfigValue('VehicleTypes.' .. tostring(raceVehicleType) .. '.serverTypes',
+        DEFAULT_SERVER_VEHICLE_TYPES[raceVehicleType] or DEFAULT_SERVER_VEHICLE_TYPES.car)
+    for _, name in ipairs(allowed) do
+        if name == vehicleType then return true end
+    end
+    return false
+end
+
+-- ソロで、スタート時の車両に乗ったままか（位置が取れない環境では確認しない）
+local function IsInSoloRunVehicle(src, run)
+    if not run.vehicle then return true end
+    return GetServerPlayerVehicle(src) == run.vehicle
+end
+
 -- ソロレース開始（GO の瞬間にクライアントから届く）
 -- mode: 'daily' ならデイリーレースとして走る（その日のデイリーで、報酬が残っている場合のみ）
 RegisterNetEvent('qbx_racing:server:soloRaceStarted', function(raceId, mode)
@@ -1859,7 +1891,7 @@ RegisterNetEvent('qbx_racing:server:soloRaceStarted', function(raceId, mode)
     soloRuns[src] = run
     
     -- 通過の確認に使うコース（チェックポイントは順番にしか進めない。ゴールはサーバーが確認した進捗が最終地点の時だけ）
-    local race = MySQL.single.await('SELECT race_type, laps FROM qbx_races WHERE id = ? AND is_active = 1', {raceId})
+    local race = MySQL.single.await('SELECT vehicle_type, race_type, laps FROM qbx_races WHERE id = ? AND is_active = 1', {raceId})
     local checkpoints = race and MySQL.query.await([[
         SELECT x, y, z, radius FROM qbx_race_checkpoints WHERE race_id = ? ORDER BY checkpoint_order ASC
     ]], {raceId}) or {}
@@ -1868,16 +1900,23 @@ RegisterNetEvent('qbx_racing:server:soloRaceStarted', function(raceId, mode)
         soloRuns[src] = nil
         return
     end
-    local isSprint = race.race_type == 'sprint'
-    run.checkpoints = checkpoints
-    run.totalLaps = isSprint and 1 or math.max(1, ToInteger(race.laps) or 1)
-    run.lapEndIndex = isSprint and #checkpoints or #checkpoints + 1
-    local pending = run.pending
-    run.pending = nil
-    for _, report in ipairs(pending) do
-        ApplySoloProgress(src, run, report[1], report[2], report[3])
+    
+    -- 乗っている車両の種類をサーバーで確認し、その車両で最後まで走ったかを見るため覚えておく
+    local vehicle = GetServerPlayerVehicle(src)
+    if vehicle ~= false then
+        if not IsServerVehicleAllowed(vehicle, race.vehicle_type) then
+            soloRuns[src] = nil
+            TriggerClientEvent('ox_lib:notify', src, {
+                title = '記録なし',
+                description = 'このレースの対象外の車両のため、タイムは記録されません',
+                type = 'error'
+            })
+            return
+        end
+        run.vehicle = vehicle
     end
     
+    -- デイリーかどうかもゴールを受け付ける前に決めておく
     if mode == 'daily' and Progression then
         local Player = GetPlayer(src)
         local ok, playable = pcall(Progression.IsDailyPlayable, Player and Player.PlayerData.citizenid, raceId)
@@ -1890,6 +1929,17 @@ RegisterNetEvent('qbx_racing:server:soloRaceStarted', function(raceId, mode)
                 type = 'inform'
             })
         end
+    end
+    if soloRuns[src] ~= run then return end
+    
+    local isSprint = race.race_type == 'sprint'
+    run.checkpoints = checkpoints
+    run.totalLaps = isSprint and 1 or math.max(1, ToInteger(race.laps) or 1)
+    run.lapEndIndex = isSprint and #checkpoints or #checkpoints + 1
+    local pending = run.pending
+    run.pending = nil
+    for _, report in ipairs(pending) do
+        ApplySoloProgress(src, run, report[1], report[2], report[3])
     end
 end)
 
@@ -1918,6 +1968,12 @@ function ApplySoloProgress(src, run, checkpoint, lap, coords)
     end
     if checkpoint ~= nextCheckpoint or lap ~= nextLap or lap > run.totalLaps then return end
     
+    -- チェックポイントはスタート時の車両でしか通過できない（クライアントも同じ判定）
+    if not IsInSoloRunVehicle(src, run) then
+        print(('^3[CAM Racing]^7 チェックポイント通過を受け付けませんでした（スタート時の車両ではありません）: src=%d race=%d'):format(
+            src, run.raceId))
+        return
+    end
     if not IsPlayerNearCheckpoint(src, SoloCheckpointAt(run, passedIndex), coords) then
         print(('^3[CAM Racing]^7 チェックポイント通過を受け付けませんでした（位置が離れています）: src=%d race=%d CP=%d'):format(
             src, run.raceId, passedIndex))
@@ -1943,13 +1999,21 @@ end)
 RegisterNetEvent('qbx_racing:server:finishRace', function(raceId, timeMs, vehicleModel)
     local src = source
     local run = soloRuns[src]
-    soloRuns[src] = nil
     raceId = ToInteger(raceId)
-    if not run or run.raceId ~= raceId then return end
+    if not run or run.raceId ~= raceId or run.finishing then return end
+    run.finishing = true
     local serverElapsed = GetGameTimer() - run.startedAt
     
-    -- 最終周のゴール直前まで順番に通過していて、ゴール地点にいること（サーバーが確認した進捗で判断）
-    if run.pending or run.lap ~= run.totalLaps or run.checkpoint ~= run.lapEndIndex
+    -- コースの読み込み（デイリーの判定を含む）が終わっていなければ待つ（短いコースや DB が遅い時）
+    local waitUntil = GetGameTimer() + 5000
+    while run.pending and soloRuns[src] == run and GetGameTimer() < waitUntil do
+        Wait(50)
+    end
+    if soloRuns[src] == run then soloRuns[src] = nil end
+    
+    -- 最終周のゴール直前まで順番に通過していて、スタート時の車両でゴール地点にいること（サーバーが確認した進捗で判断）
+    if run.pending or not run.lapEndIndex or run.lap ~= run.totalLaps or run.checkpoint ~= run.lapEndIndex
+        or not IsInSoloRunVehicle(src, run)
         or not IsPlayerNearCheckpoint(src, SoloCheckpointAt(run, run.lapEndIndex)) then
         print(('^3[CAM Racing]^7 ソロのゴールを受け付けませんでした（チェックポイント未通過）: src=%d race=%d'):format(src, raceId))
         TriggerClientEvent('ox_lib:notify', src, {
