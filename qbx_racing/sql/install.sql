@@ -204,8 +204,10 @@ CREATE TABLE IF NOT EXISTS `qbx_ranking_log` (
     `delta` INT NOT NULL,
     `reason` VARCHAR(50) NOT NULL,
     `race_id` INT NULL,
+    `ref` VARCHAR(64) NULL,             -- 1回の変動を識別する値（実際に変わった量を読み直すため）
     `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    INDEX `idx_citizen_time` (`citizenid`, `created_at`)
+    INDEX `idx_citizen_time` (`citizenid`, `created_at`),
+    INDEX `idx_ref` (`ref`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 

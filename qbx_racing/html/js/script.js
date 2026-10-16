@@ -1105,7 +1105,7 @@ function renderTimeAttack() {
     }
     const runs = taData.calibrationRuns || 10;
     document.getElementById('ta-desc').textContent =
-        `レース作成後、最初の${runs}回のゴールの平均タイムが目標タイムになります。` +
+        `レース作成後、${runs}回のゴール（${taData.calibrationDrivers || 1}人以上）がそろうと、各ドライバーのベストの平均が目標タイムになります。` +
         '目標タイム以内でゴールすると、1レースにつき1回だけ報酬がもらえます。';
     
     const races = (taData.races || []).filter(race => taFilter === 'all' || taStatus(race) === taFilter);
@@ -1126,11 +1126,14 @@ function taCardHtml(race, runs) {
     let body;
     if (status === 'pending') {
         const count = Math.min(Number(race.calib_count || 0), runs);
+        const needDrivers = taData.calibrationDrivers || 1;
+        const drivers = Math.min(Number(race.calib_drivers || 0), needDrivers);
+        const progress = (count / runs + drivers / needDrivers) / 2;
         body = `
             <div class="ta-pending">
-                <div class="ta-pending-text">目標タイム計測中 <b>${count} / ${runs}</b></div>
-                <div class="progress"><div class="progress-bar" style="width: ${Math.round(count / runs * 100)}%"></div></div>
-                <div class="muted">あと${runs - count}回ゴールがあると目標タイムと報酬が決まります</div>
+                <div class="ta-pending-text">目標タイム計測中 ゴール <b>${count} / ${runs}</b>・ドライバー <b>${drivers} / ${needDrivers}人</b></div>
+                <div class="progress"><div class="progress-bar" style="width: ${Math.round(progress * 100)}%"></div></div>
+                <div class="muted">${runs}回のゴールと${needDrivers}人以上のドライバーがそろうと、各ドライバーのベストの平均で目標タイムと報酬が決まります</div>
             </div>`;
     } else {
         const myBest = Number(race.my_best || 0);
@@ -1259,7 +1262,7 @@ function renderAdmin(data) {
                 ${badgesHtml(race.vehicle_type, race.race_type)}
             </span>
             <span>${race.target_time_ms ? formatTime(race.target_time_ms)
-                : `<span class="muted">計測中 ${Math.min(Number(race.calib_count || 0), runs)}/${runs}</span>`}</span>
+                : `<span class="muted">計測中 ${Math.min(Number(race.calib_count || 0), runs)}/${runs}回・${Number(race.calib_drivers || 0)}人</span>`}</span>
             <span>${race.ta_reward ? `${formatMoney(race.ta_reward)}<span class="muted">（レート${race.ta_rate}）</span>` : '-'}</span>
             <span class="table-actions">
                 <button class="btn-small" data-action="detail" data-race-id="${race.id}" title="詳細"><i class="fas fa-eye"></i> 詳細</button>

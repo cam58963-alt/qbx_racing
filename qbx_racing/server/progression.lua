@@ -41,6 +41,10 @@ local function GetCalibrationRuns()
     return math.max(1, ToInteger(GetConfigValue('TimeAttack.calibrationRuns', 10)) or 10)
 end
 
+local function GetCalibrationDrivers()
+    return math.max(1, ToInteger(GetConfigValue('TimeAttack.calibrationDrivers', 3)) or 3)
+end
+
 -- コースの長さ（m）と通過するチェックポイントの数
 -- 周回は毎周スタート地点（CP1）に戻る
 local function CourseLength(race, checkpoints)
@@ -89,21 +93,27 @@ end
 local function AddRankingPoints(citizenid, delta, reason, raceId)
     delta = ToInteger(delta)
     if not citizenid or not delta or delta == 0 then return 0 end
-    local current = MySQL.scalar.await('SELECT points FROM qbx_driver_profiles WHERE citizenid = ?', {citizenid})
-    if current == nil then return 0 end
-    local applied = math.max(delta, -math.max(0, ToInteger(current) or 0))
-    if applied == 0 then return 0 end
+    -- 持ち点はトランザクションの中でロックして読み、減らせる分だけ減らす（同時に別の処理で減っても正しく記録する）
+    -- 実際に変わった量は ref で履歴から読み直す
+    local ref = ('%s:%d:%d'):format(citizenid, GetGameTimer(), math.random(1, 1000000000))
     local ok = MySQL.transaction.await({
+        {query = 'SET @qbx_rp_applied = 0', values = {}},
         {
-            query = 'UPDATE qbx_driver_profiles SET points = GREATEST(0, points + ?) WHERE citizenid = ?',
-            values = {applied, citizenid}
+            query = 'SELECT GREATEST(?, -GREATEST(points, 0)) INTO @qbx_rp_applied FROM qbx_driver_profiles WHERE citizenid = ? FOR UPDATE',
+            values = {delta, citizenid}
         },
         {
-            query = 'INSERT INTO qbx_ranking_log (citizenid, delta, reason, race_id) VALUES (?, ?, ?, ?)',
-            values = {citizenid, applied, reason, raceId}
+            query = 'UPDATE qbx_driver_profiles SET points = points + @qbx_rp_applied WHERE citizenid = ?',
+            values = {citizenid}
+        },
+        {
+            query = [[INSERT INTO qbx_ranking_log (citizenid, delta, reason, race_id, ref)
+                      SELECT ?, @qbx_rp_applied, ?, ?, ? FROM DUAL WHERE @qbx_rp_applied <> 0]],
+            values = {citizenid, reason, raceId, ref}
         }
     })
-    return ok and applied or 0
+    if not ok then return 0 end
+    return ToInteger(MySQL.scalar.await('SELECT delta FROM qbx_ranking_log WHERE ref = ?', {ref})) or 0
 end
 
 -- 今日すでに同じ理由で同じレースのポイントをもらったか（ソロの稼ぎすぎ防止）
@@ -135,18 +145,37 @@ function Progression.UpdateTargetTime(raceId)
     ]], {raceId})
     if not race or race.target_time_ms then return nil end
 
-    local runs = GetCalibrationRuns()
     -- サーバーで測った経過時間を使う（クライアントの申告タイムは許容範囲内でずらせるため）
     -- server_time_ms の無い古い記録は数えない
+    -- 1人がわざと遅く走って目標タイムを甘くできないように:
+    --   ・ゴール数に加えて一定人数以上のドライバーが必要
+    --   ・各ドライバーはベストタイム1つだけを使う
+    --   ・ベストタイムの中央値から大きく遅いものは除く
     local rows = MySQL.query.await([[
-        SELECT server_time_ms AS time_ms FROM qbx_race_times
-        WHERE race_id = ? AND id > ? AND server_time_ms IS NOT NULL ORDER BY id ASC LIMIT ?
-    ]], {raceId, ToInteger(race.ta_calib_after_id) or 0, runs}) or {}
-    if #rows < runs then return nil end
-
-    local sum = 0
-    for _, row in ipairs(rows) do sum = sum + (tonumber(row.time_ms) or 0) end
-    local target = math.floor(sum / #rows)
+        SELECT citizenid, MIN(server_time_ms) AS best, COUNT(*) AS runs FROM qbx_race_times
+        WHERE race_id = ? AND id > ? AND server_time_ms IS NOT NULL
+        GROUP BY citizenid
+    ]], {raceId, ToInteger(race.ta_calib_after_id) or 0}) or {}
+    local totalRuns, bests = 0, {}
+    for _, row in ipairs(rows) do
+        totalRuns = totalRuns + (tonumber(row.runs) or 0)
+        local best = tonumber(row.best)
+        if best and best > 0 then bests[#bests + 1] = best end
+    end
+    if totalRuns < GetCalibrationRuns() or #bests < GetCalibrationDrivers() then return nil end
+    
+    table.sort(bests)
+    local middle = #bests // 2
+    local median = #bests % 2 == 1 and bests[middle + 1] or (bests[middle] + bests[middle + 1]) / 2
+    local limit = median * math.max(1, tonumber(GetConfigValue('TimeAttack.calibrationOutlierFactor', 1.5)) or 1.5)
+    local sum, count = 0, 0
+    for _, best in ipairs(bests) do
+        if best <= limit then
+            sum, count = sum + best, count + 1
+        end
+    end
+    if count == 0 then return nil end
+    local target = math.floor(sum / count)
     if target <= 0 then return nil end
 
     local checkpoints = MySQL.query.await([[
@@ -167,11 +196,14 @@ function Progression.UpdateTargetTime(raceId)
 end
 
 -- 計測中のレースの記録数
-local function CalibrationCount(raceId)
-    return tonumber(MySQL.scalar.await([[
-        SELECT COUNT(*) FROM qbx_race_times t JOIN qbx_races r ON r.id = t.race_id
+-- 計測中のレースの記録数とドライバー数
+local function CalibrationStatus(raceId)
+    local row = MySQL.single.await([[
+        SELECT COUNT(*) AS runs, COUNT(DISTINCT t.citizenid) AS drivers
+        FROM qbx_race_times t JOIN qbx_races r ON r.id = t.race_id
         WHERE t.race_id = ? AND t.id > r.ta_calib_after_id AND t.server_time_ms IS NOT NULL
-    ]], {raceId})) or 0
+    ]], {raceId}) or {}
+    return tonumber(row.runs) or 0, tonumber(row.drivers) or 0
 end
 
 -- ===================================
@@ -399,8 +431,10 @@ function Progression.OnSoloRaceFinished(src, citizenid, race, timeMs, isDaily)
         if newTarget then
             lines[#lines + 1] = ('📊 目標タイムが決まりました: %s（TA報酬 $%s）'):format(FormatTimeMs(newTarget), FormatMoney(newReward))
         else
-            lines[#lines + 1] = ('📊 目標タイム計測中（%d/%d）'):format(
-                math.min(CalibrationCount(race.id), GetCalibrationRuns()), GetCalibrationRuns())
+            local runs, drivers = CalibrationStatus(race.id)
+            lines[#lines + 1] = ('📊 目標タイム計測中（ゴール %d/%d・ドライバー %d/%d人）'):format(
+                math.min(runs, GetCalibrationRuns()), GetCalibrationRuns(),
+                math.min(drivers, GetCalibrationDrivers()), GetCalibrationDrivers())
         end
     end
 
@@ -621,6 +655,7 @@ lib.callback.register('qbx_racing:getTimeAttack', function(source)
             SELECT r.id, r.name, r.vehicle_type, r.race_type, r.laps,
                    r.target_time_ms, r.ta_reward, r.ta_rate, r.course_length_m,
                    (SELECT COUNT(*) FROM qbx_race_times t WHERE t.race_id = r.id AND t.id > r.ta_calib_after_id AND t.server_time_ms IS NOT NULL) AS calib_count,
+                   (SELECT COUNT(DISTINCT t.citizenid) FROM qbx_race_times t WHERE t.race_id = r.id AND t.id > r.ta_calib_after_id AND t.server_time_ms IS NOT NULL) AS calib_drivers,
                    (SELECT MIN(time_ms) FROM qbx_race_times t WHERE t.race_id = r.id AND t.citizenid = ?) AS my_best,
                    (SELECT time_ms FROM qbx_ta_claims c WHERE c.race_id = r.id AND c.citizenid = ?) AS claimed_time
             FROM qbx_races r
@@ -634,7 +669,8 @@ lib.callback.register('qbx_racing:getTimeAttack', function(source)
         -- 記録がそろっているのに目標タイムが無いレース（設定変更・前回の失敗など）はここで決める
         local updated = false
         for _, race in ipairs(races) do
-            if not race.target_time_ms and (tonumber(race.calib_count) or 0) >= runs then
+            if not race.target_time_ms and (tonumber(race.calib_count) or 0) >= runs
+                and (tonumber(race.calib_drivers) or 0) >= GetCalibrationDrivers() then
                 updated = Progression.UpdateTargetTime(race.id) ~= nil or updated
             end
         end
@@ -644,6 +680,7 @@ lib.callback.register('qbx_racing:getTimeAttack', function(source)
     return {
         enabled = TimeAttackEnabled(),
         calibrationRuns = runs,
+        calibrationDrivers = GetCalibrationDrivers(),
         races = races
     }
 end)

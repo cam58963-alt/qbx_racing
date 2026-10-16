@@ -2039,6 +2039,12 @@ RegisterNetEvent('qbx_racing:server:finishRace', function(raceId, timeMs, vehicl
             description = 'チェックポイントの通過を確認できなかったため、タイムは記録されませんでした',
             type = 'error'
         })
+        -- 受け付けられなかったゴールはリタイア扱い（途中で投げ出してペナルティを避けられないように）
+        local Player = GetPlayer(src)
+        if Player and Progression then
+            local ok, err = pcall(Progression.OnSoloRaceRetired, src, Player.PlayerData.citizenid, run.raceId)
+            if not ok then print('^1[CAM Racing]^7 リタイアの処理に失敗しました: ' .. tostring(err)) end
+        end
         return
     end
     
@@ -2496,8 +2502,10 @@ local SCHEMA_TABLES = {
             `delta` INT NOT NULL,
             `reason` VARCHAR(50) NOT NULL,
             `race_id` INT NULL,
+            `ref` VARCHAR(64) NULL,
             `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            INDEX `idx_citizen_time` (`citizenid`, `created_at`)
+            INDEX `idx_citizen_time` (`citizenid`, `created_at`),
+            INDEX `idx_ref` (`ref`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     ]]
 }
@@ -2518,6 +2526,7 @@ local SCHEMA_COLUMNS = {
     {'qbx_race_turn_guides', 'segments', "INT DEFAULT 1 AFTER `direction`"},
     -- タイムアタック（目標タイム・報酬）。目標タイムはサーバーで測った経過時間から計算する
     {'qbx_race_times', 'server_time_ms', "INT NULL AFTER `time_ms`"},
+    {'qbx_ranking_log', 'ref', "VARCHAR(64) NULL AFTER `race_id`, ADD INDEX `idx_ref` (`ref`)"},
     {'qbx_races', 'target_time_ms', "INT NULL"},
     {'qbx_races', 'ta_reward', "INT NULL"},
     {'qbx_races', 'ta_rate', "INT NULL"},

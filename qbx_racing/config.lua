@@ -455,12 +455,15 @@ Config.Race = {
 
 -- ===================================
 -- タイムアタック（TA）
--- レース作成後、最初の calibrationRuns 回のゴールタイムの平均が「目標タイム」になる。
+-- レース作成後、calibrationRuns 回のゴール（calibrationDrivers 人以上）がそろうと、
+-- 各ドライバーのベストタイムの平均が「目標タイム」になる（極端に遅いベストは除く）。
 -- 目標タイム以内でゴールすると、1人1レースにつき1回だけ報酬がもらえる。
 -- ===================================
 Config.TimeAttack = {
     enabled = true,
-    calibrationRuns = 10,          -- 目標タイムを決めるのに使うゴール数（最初の N 回の平均）
+    calibrationRuns = 10,          -- 目標タイムを決めるのに必要なゴール数
+    calibrationDrivers = 3,        -- そのうち必要なドライバーの人数（1人だけで目標タイムを決められないように）
+    calibrationOutlierFactor = 1.5, -- ベストタイムの中央値のこの倍より遅いベストは平均から除く
 
     -- 報酬 = レート × unit（レートはコースの長さ・チェックポイント数・目標タイムから自動計算）
     -- スコア = 距離(km) × distanceWeight + チェックポイント数 × checkpointWeight + 目標タイム(分) × timeWeight
