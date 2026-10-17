@@ -226,6 +226,49 @@ local function CourseCheckpointAt(checkpoints, index)
     return checkpoints[index] or checkpoints[1]
 end
 
+-- ===================================
+-- レース中のテレポート検出
+-- 一定間隔でサーバーから走行中のプレイヤーの位置を見て、前回からあり得ない距離を移動していたら記録しない
+-- （許容距離 = teleportThreshold + 最高速度 × 経過時間。通信の遅れで位置がまとめて進んでも誤判定しにくいように）
+-- ===================================
+local function CheckRacerMovement(src, state, now)
+    local coords = GetServerPlayerCoords(src)
+    if not coords then return end
+    local last = state.lastSample
+    state.lastSample = {coords = coords, time = now}
+    if not last or state.teleported then return end
+    local seconds = math.max(0, (now - last.time) / 1000)
+    local allowed = GetConfigValue('Security.antiCheat.teleportThreshold', 100.0)
+        + GetConfigValue('Security.antiCheat.maxSpeed', 500.0) / 3.6 * seconds
+    local moved = #(coords - last.coords)
+    if moved > allowed then
+        state.teleported = true
+        print(('^1[CAM Racing]^7 レース中のテレポートの可能性: src=%d 移動=%.0fm / %.1f秒（許容 %.0fm）。この走行は記録しません'):format(
+            src, moved, seconds, allowed))
+    end
+end
+
+CreateThread(function()
+    while true do
+        Wait(math.max(250, ToInteger(GetConfigValue('Security.antiCheat.checkInterval', 1000)) or 1000))
+        if GetConfigValue('Security.antiCheat.enabled', true) and GetConfigValue('Security.antiCheat.teleportDetection', true) then
+            local now = GetGameTimer()
+            for src, run in pairs(soloRuns) do
+                CheckRacerMovement(src, run, now)
+            end
+            for _, session in pairs(ActiveSessions) do
+                if session.status == 'racing' then
+                    for _, participant in ipairs(session.participants) do
+                        if participant.status == 'racing' and not participant.disconnected then
+                            CheckRacerMovement(participant.source, participant, now)
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
 -- サーバーから見たプレイヤーの車両（位置が取れない環境では false = 確認しない、乗っていなければ 0）
 local function GetServerPlayerVehicle(src)
     local ped = GetPlayerPed(src)
@@ -1002,8 +1045,9 @@ function RegisterSessionParticipant(sessionId, source, options)
     
     -- DB を待っている間に開始・満員・重複になっていないか確認
     local maxParticipants = GetConfigValue('Multiplayer.maxParticipants', 16)
+    -- ソロの走行を始めていないかもここで確認し直す（DB を待っている間にソロを始められないように）
     local canJoin = ActiveSessions[sessionId] == session and session.status == 'lobby'
-        and #session.participants < maxParticipants
+        and #session.participants < maxParticipants and not soloRuns[source]
     for _, participant in ipairs(session.participants) do
         if participant.citizenid == citizenid then canJoin = false end
     end
@@ -1552,7 +1596,7 @@ RegisterNetEvent('qbx_racing:server:finishMultiRace', function(sessionId, timeMs
     if not finisher or finisher.status ~= 'racing' then return end
     
     -- 最終周のゴール直前まで順番に通過したか（サーバーが受け取った進捗で確認。ゴールの通過はこの報告自体）
-    if finisher.currentLap ~= session.totalLaps or finisher.currentCheckpoint ~= session.lapEndIndex
+    if finisher.teleported or finisher.currentLap ~= session.totalLaps or finisher.currentCheckpoint ~= session.lapEndIndex
         or (finisher.raceVehicle and GetServerPlayerVehicle(src) ~= finisher.raceVehicle)
         or not IsPlayerNearCheckpoint(src, CourseCheckpointAt(session.race.checkpoints or {}, session.lapEndIndex), nil, session.race.vehicle_type) then
         print(('^3[CAM Racing]^7 ゴールを受け付けませんでした（チェックポイント未通過）: %s session=%d'):format(
@@ -1926,8 +1970,15 @@ RegisterNetEvent('qbx_racing:server:soloRaceStarted', function(raceId, mode)
     raceId = ToInteger(raceId)
     if not raceId then return end
     
-    -- マルチのセッションに参加中はソロを始められない（1回の走行をソロとマルチの両方で記録させないため）
-    if FindPlayerActiveSession(src) then
+    -- 走行中のソロを終わらせずに次を始めた場合は、前の走行をリタイア扱いにする
+    -- （通常の画面からは走行中に次のレースを始められないため、リタイアのペナルティを避ける操作になる）
+    local previous = soloRuns[src]
+    soloRuns[src] = nil
+    PenalizeSoloRun(src, previous)
+    
+    -- マルチのセッションに参加中・参加処理中はソロを始められない（1回の走行をソロとマルチの両方で記録させないため）
+    -- ※ この確認から soloRuns に登録するまでの間に待ち（DB など）を入れないこと
+    if FindPlayerActiveSession(src) or busyPlayers[src] then
         TriggerClientEvent('ox_lib:notify', src, {
             title = '記録なし',
             description = 'マルチのセッションに参加中のため、ソロのタイムは記録されません',
@@ -1936,16 +1987,12 @@ RegisterNetEvent('qbx_racing:server:soloRaceStarted', function(raceId, mode)
         return
     end
     
-    -- 走行中のソロを終わらせずに次を始めた場合は、前の走行をリタイア扱いにする
-    -- （通常の画面からは走行中に次のレースを始められないため、リタイアのペナルティを避ける操作になる）
-    local previous = soloRuns[src]
-    soloRuns[src] = nil
-    PenalizeSoloRun(src, previous)
-    
     -- コースを読み込む間に届いた通過報告は pending に貯めて、読み込み後に順番に確認する
     -- （スタート直後にスタート地点を通過した報告がすぐ届くため）
     local run = {raceId = raceId, startedAt = startedAt, daily = false, pending = {}, checkpoint = 1, lap = 1}
     soloRuns[src] = run
+    local startCoords = GetServerPlayerCoords(src)
+    if startCoords then run.lastSample = {coords = startCoords, time = startedAt} end
     -- 切断時のリタイア処理のため（切断後はプレイヤー情報が取れない）
     local starter = GetPlayer(src)
     run.citizenid = starter and starter.PlayerData.citizenid
@@ -2072,7 +2119,7 @@ RegisterNetEvent('qbx_racing:server:finishRace', function(raceId, timeMs, vehicl
     if soloRuns[src] == run then soloRuns[src] = nil end
     
     -- 最終周のゴール直前まで順番に通過していて、スタート時の車両でゴール地点にいること（サーバーが確認した進捗で判断）
-    if run.pending or not run.lapEndIndex or run.lap ~= run.totalLaps or run.checkpoint ~= run.lapEndIndex
+    if run.pending or run.teleported or not run.lapEndIndex or run.lap ~= run.totalLaps or run.checkpoint ~= run.lapEndIndex
         or not IsInSoloRunVehicle(src, run)
         or not IsPlayerNearCheckpoint(src, SoloCheckpointAt(run, run.lapEndIndex), nil, run.vehicleType) then
         print(('^3[CAM Racing]^7 ソロのゴールを受け付けませんでした（チェックポイント未通過）: src=%d race=%d'):format(src, raceId))

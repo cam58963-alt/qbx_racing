@@ -829,8 +829,8 @@ Config.Security = {
     antiCheat = {
         enabled = true,
         maxSpeed = 500.0,          -- 最大速度（km/h）
-        teleportDetection = true,  -- テレポート検出
-        teleportThreshold = 100.0, -- テレポート判定距離（メートル）
+        teleportDetection = true,  -- テレポート検出（走行中の位置を checkInterval ごとに確認し、あり得ない移動をした走行は記録しない）
+        teleportThreshold = 100.0, -- テレポート判定の余裕（メートル）。許容距離 = この値 + maxSpeed × 経過時間
         progressDistanceMargin = 100.0, -- チェックポイント通過の許容距離の既定値（車両タイプごとの progressDistanceMargin が無い場合に使う）
         checkInterval = 1000       -- チェック間隔（ミリ秒）
     },
