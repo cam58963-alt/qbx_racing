@@ -275,7 +275,10 @@ CreateThread(function()
         do
             local now = GetGameTimer()
             for src, run in pairs(soloRuns) do
-                CheckRacerMovement(src, run, now)
+                -- コースの読み込み中は確認しない（貯めた報告を後から順に確認するため、位置の順番が前後しないように）
+                if not run.pending then
+                    CheckRacerMovement(src, run, now)
+                end
             end
             for _, session in pairs(ActiveSessions) do
                 if session.status == 'racing' then
