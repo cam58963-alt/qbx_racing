@@ -75,7 +75,9 @@ Config.VehicleTypes = {
         serverTypes = {'automobile', 'bike'},
         -- チェックポイント通過の報告を受け付ける距離（判定半径 + この値、メートル）
         -- サーバーで見た位置は通信のぶん少し遅れるため、速い乗り物ほど大きめにする
-        progressDistanceMargin = 50.0
+        progressDistanceMargin = 50.0,
+        -- 不正対策の最高速度（km/h）。これより速いゴール・移動は記録しない（もっと速い車があるサーバーは上げる）
+        maxSpeed = 300.0
     },
     
     heli = {
@@ -103,7 +105,8 @@ Config.VehicleTypes = {
             16  -- Planes
         },
         serverTypes = {'heli', 'plane'},
-        progressDistanceMargin = 150.0  -- 速度が出る・高度もずれるため大きめ
+        progressDistanceMargin = 150.0, -- 速度が出る・高度もずれるため大きめ
+        maxSpeed = 450.0
     },
     
     boat = {
@@ -130,7 +133,8 @@ Config.VehicleTypes = {
             14  -- Boats
         },
         serverTypes = {'boat', 'submarine'},
-        progressDistanceMargin = 80.0   -- 波で揺れるため車より大きめ
+        progressDistanceMargin = 80.0,  -- 波で揺れるため車より大きめ
+        maxSpeed = 200.0
     }
 }
 
@@ -828,7 +832,7 @@ Config.Security = {
     -- チート対策
     antiCheat = {
         enabled = true,
-        maxSpeed = 500.0,          -- 最大速度（km/h）
+        maxSpeed = 500.0,          -- 最大速度（km/h）の既定値（車両タイプごとの maxSpeed が無い場合に使う）
         teleportDetection = true,  -- テレポート検出（走行中の位置を checkInterval ごとに確認し、あり得ない移動をした走行は記録しない）
         teleportThreshold = 100.0, -- テレポート判定の余裕（メートル）。許容距離 = この値 + maxSpeed × 経過時間
         progressDistanceMargin = 100.0, -- チェックポイント通過の許容距離の既定値（車両タイプごとの progressDistanceMargin が無い場合に使う）

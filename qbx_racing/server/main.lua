@@ -169,6 +169,12 @@ end
 -- ソロレースの開始記録（サーバー側でタイムを確認するため）
 local soloRuns = {}
 
+-- 車両タイプごとの最高速度（km/h）。無ければ Security.antiCheat.maxSpeed
+local function GetMaxSpeedKmh(vehicleType)
+    return tonumber(GetConfigValue('VehicleTypes.' .. tostring(vehicleType) .. '.maxSpeed',
+        GetConfigValue('Security.antiCheat.maxSpeed', 500.0))) or 500.0
+end
+
 -- コースを最高速度で走っても必要な最短時間（これより速いゴールは不正とみなす）
 local function CalculateMinRaceTimeMs(race)
     if not GetConfigValue('Security.antiCheat.enabled', true) then return 0 end
@@ -195,7 +201,7 @@ local function CalculateMinRaceTimeMs(race)
     end
     local total = lapDistance * laps
     
-    local maxSpeed = GetConfigValue('Security.antiCheat.maxSpeed', 500.0) / 3.6 -- km/h → m/s
+    local maxSpeed = GetMaxSpeedKmh(race.vehicle_type) / 3.6 -- km/h → m/s
     if total <= 0 or maxSpeed <= 0 then return 0 end
     return math.floor(total / maxSpeed * 1000)
 end
@@ -260,7 +266,7 @@ local function CheckRacerMovement(src, state, now, coords, deferCommit)
     
     local seconds = (time - (state.anchorTime or last.time)) / 1000
     local allowed = GetConfigValue('Security.antiCheat.teleportThreshold', 100.0)
-        + GetConfigValue('Security.antiCheat.maxSpeed', 500.0) / 3.6 * seconds
+        + GetMaxSpeedKmh(state.vehicleType) / 3.6 * seconds
     if travelled > allowed then
         state.teleported = true
         print(('^1[CAM Racing]^7 レース中のテレポートの可能性: src=%d 移動の合計=%.0fm / %.1f秒（許容 %.0fm）。この走行は記録しません'):format(
@@ -1305,6 +1311,7 @@ RegisterNetEvent('qbx_racing:server:startCountdown', function(sessionId)
                 and (not startCoords or #(GetEntityCoords(vehicle) - startCoords) <= startRadius) then
                 -- 進捗とゴールはこの車両でしか受け付けない（途中で乗り換えた走りは記録しない）
                 participant.raceVehicle = vehicle
+                participant.vehicleType = session.race.vehicle_type
                 table.insert(validParticipants, participant.source)
             end
         end
@@ -2173,7 +2180,7 @@ RegisterNetEvent('qbx_racing:server:finishRace', function(raceId, timeMs, vehicl
     if not profile then return end
     
     -- 削除済みのレースには記録しない
-    local race = MySQL.single.await('SELECT id, name, race_type, laps, target_time_ms, ta_reward FROM qbx_races WHERE id = ? AND is_active = 1', {raceId})
+    local race = MySQL.single.await('SELECT id, name, vehicle_type, race_type, laps, target_time_ms, ta_reward FROM qbx_races WHERE id = ? AND is_active = 1', {raceId})
     if not race then return end
     race.checkpoints = MySQL.query.await([[
         SELECT x, y, z, radius FROM qbx_race_checkpoints WHERE race_id = ? ORDER BY checkpoint_order ASC
