@@ -228,13 +228,14 @@ end
 
 -- ===================================
 -- レース中のテレポート検出
--- 一定間隔でサーバーから走行中のプレイヤーの位置を見て、前回からあり得ない距離を移動していたら記録しない
--- （許容距離 = teleportThreshold + 最高速度 × 経過時間。通信の遅れで位置がまとめて進んでも誤判定しにくいように）
+-- 走り始めてからの移動距離の合計（確認した位置を順につないだ距離）が
+-- 「teleportThreshold + 最高速度 × 走り始めてからの時間」を超えたら、その走行は記録しない
+-- （余裕 teleportThreshold は走行全体で1回分だけ。確認のたびに余裕が増えて、少しずつ瞬間移動できないように）
+-- 位置は一定間隔の確認と、受け付けたチェックポイント・ゴールの報告のたびに記録する
 -- ===================================
--- 定期確認に加えて、チェックポイント・ゴールの報告を受け付けるたびにも呼ぶ（確認の間に移動して戻る手口を防ぐ）
 -- coords: その時点の位置（省略すると今の位置）
--- deferCommit: true なら確認した位置を基準として記録しない（報告が受け付けられた時だけ呼び出し側で記録する。
---              受け付けられなかった報告を何度も送って、少しずつ基準を進められないように）
+-- deferCommit: true なら確認した位置を記録しない（報告が受け付けられた時だけ呼び出し側で記録する。
+--              受け付けられなかった報告を何度も送って、移動を記録させないように）
 -- 戻り値: テレポートしていなければ true, 記録する位置（deferCommit の時に呼び出し側で state.lastSample に入れる）
 local function CheckRacerMovement(src, state, now, coords, deferCommit)
     if not GetConfigValue('Security.antiCheat.enabled', true) or not GetConfigValue('Security.antiCheat.teleportDetection', true) then
@@ -243,18 +244,27 @@ local function CheckRacerMovement(src, state, now, coords, deferCommit)
     coords = coords or GetServerPlayerCoords(src)
     if not coords then return not state.teleported end
     local last = state.lastSample
-    local sample = {coords = coords, time = now}
+    if not last then
+        -- 最初の位置が基準（ここからの合計で判定する）
+        local sample = {coords = coords, time = now, travelled = 0}
+        state.anchorTime = now
+        if not deferCommit then state.lastSample = sample end
+        return not state.teleported, sample
+    end
+    -- 読み込み中に届いた報告を後から確認する時は時刻が前後するため、時刻は後ろに戻さない
+    local time = math.max(now, last.time)
+    local travelled = last.travelled + #(coords - last.coords)
+    local sample = {coords = coords, time = time, travelled = travelled}
     if not deferCommit then state.lastSample = sample end
-    if not last or state.teleported then return not state.teleported, sample end
-    -- 読み込み中に届いた報告を後から確認する時は時刻が前後するため、間隔は絶対値で見る
-    local seconds = math.abs(now - last.time) / 1000
+    if state.teleported then return false, sample end
+    
+    local seconds = (time - (state.anchorTime or last.time)) / 1000
     local allowed = GetConfigValue('Security.antiCheat.teleportThreshold', 100.0)
         + GetConfigValue('Security.antiCheat.maxSpeed', 500.0) / 3.6 * seconds
-    local moved = #(coords - last.coords)
-    if moved > allowed then
+    if travelled > allowed then
         state.teleported = true
-        print(('^1[CAM Racing]^7 レース中のテレポートの可能性: src=%d 移動=%.0fm / %.1f秒（許容 %.0fm）。この走行は記録しません'):format(
-            src, moved, seconds, allowed))
+        print(('^1[CAM Racing]^7 レース中のテレポートの可能性: src=%d 移動の合計=%.0fm / %.1f秒（許容 %.0fm）。この走行は記録しません'):format(
+            src, travelled, seconds, allowed))
     end
     return not state.teleported, sample
 end
@@ -2006,7 +2016,10 @@ RegisterNetEvent('qbx_racing:server:soloRaceStarted', function(raceId, mode)
     local run = {raceId = raceId, startedAt = startedAt, daily = false, pending = {}, checkpoint = 1, lap = 1}
     soloRuns[src] = run
     local startCoords = GetServerPlayerCoords(src)
-    if startCoords then run.lastSample = {coords = startCoords, time = startedAt} end
+    if startCoords then
+        run.lastSample = {coords = startCoords, time = startedAt, travelled = 0}
+        run.anchorTime = startedAt
+    end
     -- 切断時のリタイア処理のため（切断後はプレイヤー情報が取れない）
     local starter = GetPlayer(src)
     run.citizenid = starter and starter.PlayerData.citizenid
