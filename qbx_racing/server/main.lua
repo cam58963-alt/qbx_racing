@@ -1898,9 +1898,11 @@ local function PenalizeSoloRun(src, run)
 end
 
 -- ソロで、スタート時の車両に乗ったままか（位置が取れない環境では確認しない）
-local function IsInSoloRunVehicle(src, run)
+-- vehicle: 確認する車両（省略すると今乗っている車両）
+local function IsInSoloRunVehicle(src, run, vehicle)
     if not run.vehicle then return true end
-    return GetServerPlayerVehicle(src) == run.vehicle
+    if vehicle == nil then vehicle = GetServerPlayerVehicle(src) end
+    return vehicle == run.vehicle
 end
 
 -- ソロレース開始（GO の瞬間にクライアントから届く）
@@ -1908,6 +1910,8 @@ end
 RegisterNetEvent('qbx_racing:server:soloRaceStarted', function(raceId, mode)
     local src = source
     local startedAt = GetGameTimer()
+    -- 車両はイベントが届いた時点のものを使う（コースを読み込む間に乗り換えても、スタート時の車両で判定する）
+    local vehicle = GetServerPlayerVehicle(src)
     raceId = ToInteger(raceId)
     if not raceId then return end
     
@@ -1937,7 +1941,6 @@ RegisterNetEvent('qbx_racing:server:soloRaceStarted', function(raceId, mode)
     end
     
     -- 乗っている車両の種類をサーバーで確認し、その車両で最後まで走ったかを見るため覚えておく
-    local vehicle = GetServerPlayerVehicle(src)
     if vehicle ~= false then
         if not IsServerVehicleAllowed(vehicle, race.vehicle_type) then
             soloRuns[src] = nil
@@ -1974,7 +1977,7 @@ RegisterNetEvent('qbx_racing:server:soloRaceStarted', function(raceId, mode)
     local pending = run.pending
     run.pending = nil
     for _, report in ipairs(pending) do
-        ApplySoloProgress(src, run, report[1], report[2], report[3])
+        ApplySoloProgress(src, run, report[1], report[2], report[3], report[4])
     end
 end)
 
@@ -1989,13 +1992,16 @@ RegisterNetEvent('qbx_racing:server:soloProgress', function(raceId, checkpoint, 
         -- 位置は報告が届いた時点のものを使う（読み込み後の位置で確認すると先に進んだぶん離れてしまう）
         -- 上限は一番長いコース（チェックポイント最大数 + スタート地点）× 最大周回数
         local maxReports = (GetConfigValue('Checkpoint.maxCheckpoints', 50) + 1) * GetConfigValue('RaceTypes.circuit.maxLaps', 10)
-        if #run.pending < maxReports then run.pending[#run.pending + 1] = {checkpoint, lap, GetServerPlayerCoords(src)} end
+        if #run.pending < maxReports then
+            run.pending[#run.pending + 1] = {checkpoint, lap, GetServerPlayerCoords(src), GetServerPlayerVehicle(src)}
+        end
         return
     end
     ApplySoloProgress(src, run, checkpoint, lap)
 end)
 
-function ApplySoloProgress(src, run, checkpoint, lap, coords)
+-- coords / vehicle: 報告が届いた時点の位置と車両（省略すると今の位置と車両）
+function ApplySoloProgress(src, run, checkpoint, lap, coords, vehicle)
     -- 1つずつ順番にしか進めない（周回は index n+1 = スタート地点を通ると次の周の CP2）
     local passedIndex, nextCheckpoint, nextLap
     if run.checkpoint < run.lapEndIndex then
@@ -2006,7 +2012,7 @@ function ApplySoloProgress(src, run, checkpoint, lap, coords)
     if checkpoint ~= nextCheckpoint or lap ~= nextLap or lap > run.totalLaps then return end
     
     -- チェックポイントはスタート時の車両でしか通過できない（クライアントも同じ判定）
-    if not IsInSoloRunVehicle(src, run) then
+    if not IsInSoloRunVehicle(src, run, vehicle) then
         print(('^3[CAM Racing]^7 チェックポイント通過を受け付けませんでした（スタート時の車両ではありません）: src=%d race=%d'):format(
             src, run.raceId))
         return
