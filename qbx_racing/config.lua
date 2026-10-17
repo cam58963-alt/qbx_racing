@@ -72,7 +72,10 @@ Config.VehicleTypes = {
         -- 11: Utility, 12: Vans, 17: Service, 18: Emergency, 19: Military, 20: Commercial
         allowedClasses = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 17, 18, 19, 20},
         -- サーバーで確認する車両の種類（GetVehicleType。細かいクラスはクライアントで確認）
-        serverTypes = {'automobile', 'bike'}
+        serverTypes = {'automobile', 'bike'},
+        -- チェックポイント通過の報告を受け付ける距離（判定半径 + この値、メートル）
+        -- サーバーで見た位置は通信のぶん少し遅れるため、速い乗り物ほど大きめにする
+        progressDistanceMargin = 50.0
     },
     
     heli = {
@@ -99,7 +102,8 @@ Config.VehicleTypes = {
             15, -- Helicopters
             16  -- Planes
         },
-        serverTypes = {'heli', 'plane'}
+        serverTypes = {'heli', 'plane'},
+        progressDistanceMargin = 150.0  -- 速度が出る・高度もずれるため大きめ
     },
     
     boat = {
@@ -125,7 +129,8 @@ Config.VehicleTypes = {
         allowedClasses = {
             14  -- Boats
         },
-        serverTypes = {'boat', 'submarine'}
+        serverTypes = {'boat', 'submarine'},
+        progressDistanceMargin = 80.0   -- 波で揺れるため車より大きめ
     }
 }
 
@@ -826,7 +831,7 @@ Config.Security = {
         maxSpeed = 500.0,          -- 最大速度（km/h）
         teleportDetection = true,  -- テレポート検出
         teleportThreshold = 100.0, -- テレポート判定距離（メートル）
-        progressDistanceMargin = 100.0, -- ソロのチェックポイント通過報告: サーバーで見たプレイヤー位置との許容距離（判定半径＋この値、メートル）
+        progressDistanceMargin = 100.0, -- チェックポイント通過の許容距離の既定値（車両タイプごとの progressDistanceMargin が無い場合に使う）
         checkInterval = 1000       -- チェック間隔（ミリ秒）
     },
     

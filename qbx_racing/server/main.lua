@@ -211,11 +211,14 @@ end
 
 -- サーバーで見たプレイヤーの位置がチェックポイントの近くか（位置が取れない場合は確認しない）
 -- coords: 報告が届いた時点の位置（省略すると今の位置）
-local function IsPlayerNearCheckpoint(src, cp, coords)
+-- vehicleType: レースの車両タイプ（許容距離は車両タイプごと。速い乗り物ほどサーバーの位置とのずれが大きい）
+local function IsPlayerNearCheckpoint(src, cp, coords, vehicleType)
     if not cp then return false end
     if coords == nil then coords = GetServerPlayerCoords(src) end
     if not coords then return true end
-    local allowed = (tonumber(cp.radius) or 10.0) + GetConfigValue('Security.antiCheat.progressDistanceMargin', 100.0)
+    local margin = GetConfigValue('VehicleTypes.' .. tostring(vehicleType) .. '.progressDistanceMargin',
+        GetConfigValue('Security.antiCheat.progressDistanceMargin', 100.0))
+    local allowed = (tonumber(cp.radius) or 10.0) + (tonumber(margin) or 100.0)
     return #(coords - vector3(cp.x, cp.y, cp.z)) <= allowed
 end
 
@@ -1526,7 +1529,7 @@ RegisterNetEvent('qbx_racing:server:updateProgress', function(sessionId, checkpo
     if participant.raceVehicle and GetServerPlayerVehicle(src) ~= participant.raceVehicle then return end
     
     -- 通過したチェックポイントの近くにいること（サーバーで見た位置で確認）
-    if not IsPlayerNearCheckpoint(src, CourseCheckpointAt(session.race.checkpoints or {}, passedIndex)) then
+    if not IsPlayerNearCheckpoint(src, CourseCheckpointAt(session.race.checkpoints or {}, passedIndex), nil, session.race.vehicle_type) then
         print(('^3[CAM Racing]^7 チェックポイント通過を受け付けませんでした（位置が離れています）: %s session=%d CP=%d'):format(
             participant.driverName, sessionId, passedIndex))
         return
@@ -1550,7 +1553,7 @@ RegisterNetEvent('qbx_racing:server:finishMultiRace', function(sessionId, timeMs
     -- 最終周のゴール直前まで順番に通過したか（サーバーが受け取った進捗で確認。ゴールの通過はこの報告自体）
     if finisher.currentLap ~= session.totalLaps or finisher.currentCheckpoint ~= session.lapEndIndex
         or (finisher.raceVehicle and GetServerPlayerVehicle(src) ~= finisher.raceVehicle)
-        or not IsPlayerNearCheckpoint(src, CourseCheckpointAt(session.race.checkpoints or {}, session.lapEndIndex)) then
+        or not IsPlayerNearCheckpoint(src, CourseCheckpointAt(session.race.checkpoints or {}, session.lapEndIndex), nil, session.race.vehicle_type) then
         print(('^3[CAM Racing]^7 ゴールを受け付けませんでした（チェックポイント未通過）: %s session=%d'):format(
             finisher.driverName, sessionId))
         return
@@ -1971,6 +1974,7 @@ RegisterNetEvent('qbx_racing:server:soloRaceStarted', function(raceId, mode)
     if soloRuns[src] ~= run then return end
     
     local isSprint = race.race_type == 'sprint'
+    run.vehicleType = race.vehicle_type
     run.checkpoints = checkpoints
     run.totalLaps = isSprint and 1 or math.max(1, ToInteger(race.laps) or 1)
     run.lapEndIndex = isSprint and #checkpoints or #checkpoints + 1
@@ -2017,7 +2021,7 @@ function ApplySoloProgress(src, run, checkpoint, lap, coords, vehicle)
             src, run.raceId))
         return
     end
-    if not IsPlayerNearCheckpoint(src, SoloCheckpointAt(run, passedIndex), coords) then
+    if not IsPlayerNearCheckpoint(src, SoloCheckpointAt(run, passedIndex), coords, run.vehicleType) then
         print(('^3[CAM Racing]^7 チェックポイント通過を受け付けませんでした（位置が離れています）: src=%d race=%d CP=%d'):format(
             src, run.raceId, passedIndex))
         return
@@ -2052,7 +2056,7 @@ RegisterNetEvent('qbx_racing:server:finishRace', function(raceId, timeMs, vehicl
     -- 最終周のゴール直前まで順番に通過していて、スタート時の車両でゴール地点にいること（サーバーが確認した進捗で判断）
     if run.pending or not run.lapEndIndex or run.lap ~= run.totalLaps or run.checkpoint ~= run.lapEndIndex
         or not IsInSoloRunVehicle(src, run)
-        or not IsPlayerNearCheckpoint(src, SoloCheckpointAt(run, run.lapEndIndex)) then
+        or not IsPlayerNearCheckpoint(src, SoloCheckpointAt(run, run.lapEndIndex), nil, run.vehicleType) then
         print(('^3[CAM Racing]^7 ソロのゴールを受け付けませんでした（チェックポイント未通過）: src=%d race=%d'):format(src, raceId))
         TriggerClientEvent('ox_lib:notify', src, {
             title = '記録なし',
