@@ -709,12 +709,12 @@ function StartRace(race)
         
         -- 案内UI表示
         lib.showTextUI(string.format(
-            '🏁 <b>レース準備中</b>: %s<br><br>'
-            .. '📍 スタート地点まで: <b>%.0fm</b><br>'
-            .. '🚗 車両タイプ: <b>%s</b><br>'
-            .. '🏎️ タイプ: <b>%s</b>（%d周）<br>'
-            .. '📍 CP: <b>%d個</b><br><br>'
-            .. '➡️ スタート地点に向かってください！<br>'
+            '🏁 **レース準備中**: %s  \n  \n'
+            .. '📍 スタート地点まで: **%.0fm**  \n'
+            .. '🚗 車両タイプ: **%s**  \n'
+            .. '🏎️ タイプ: **%s**（%d周）  \n'
+            .. '📍 CP: **%d個**  \n  \n'
+            .. '➡️ スタート地点に向かってください！  \n'
             .. '到着後すぐにカウントダウンが始まります',
             race.name, distToStart, vehicleLabel, raceTypeLabel, totalLaps, #raceCheckpoints), {
             position = "left-center",
@@ -756,12 +756,12 @@ function StartRace(race)
                 local totalLaps = currentRace.race_type == 'sprint' and 1 or (currentRace.laps or 1)
                 
                 lib.showTextUI(string.format(
-                    '🏁 <b>レース準備中</b>: %s<br><br>'
-                    .. '📍 スタート地点まで: <b>%.0fm</b><br>'
-                    .. '🚗 車両タイプ: <b>%s</b><br>'
-                    .. '🏎️ タイプ: <b>%s</b>（%d周）<br>'
-                    .. '📍 CP: <b>%d個</b><br><br>'
-                    .. '➡️ スタート地点に向かってください！<br>'
+                    '🏁 **レース準備中**: %s  \n  \n'
+                    .. '📍 スタート地点まで: **%.0fm**  \n'
+                    .. '🚗 車両タイプ: **%s**  \n'
+                    .. '🏎️ タイプ: **%s**（%d周）  \n'
+                    .. '📍 CP: **%d個**  \n  \n'
+                    .. '➡️ スタート地点に向かってください！  \n'
                     .. '到着後すぐにカウントダウンが始まります',
                     currentRace.name, dist, vehicleLabel, raceTypeLabel, totalLaps, #raceCheckpoints), {
                     position = "left-center",
@@ -850,7 +850,7 @@ function StartRace(race)
         
         isRacing = true
         raceStartTime = GetGameTimer()
-        TriggerServerEvent('qbx_racing:server:soloRaceStarted', thisRace.id)
+        TriggerServerEvent('qbx_racing:server:soloRaceStarted', thisRace.id, thisRace.playMode)
         
         -- ソロ用ゴーストモード開始（NPC衝突回避）
         StartSoloGhostMode()
@@ -966,8 +966,12 @@ end
 
 -- ソロレース進行処理
 function SoloRaceProgressThread()
+    local raceId = currentRace and currentRace.id
     RunRaceProgress(
-        function() end,
+        function(lap, index)
+            -- サーバーに進捗報告（ゴール時にサーバーが順番どおりに通過したか確認する）
+            TriggerServerEvent('qbx_racing:server:soloProgress', raceId, index, lap)
+        end,
         FinishSoloRace,
         function(reason) RetireSoloRace(reason) end
     )
@@ -1072,6 +1076,9 @@ function RetireSoloRace(reason)
     if not isRacing then return end
     
     DebugLog('Solo race retired')
+    if currentRace then
+        TriggerServerEvent('qbx_racing:server:soloRaceRetired', currentRace.id)
+    end
     
     lib.notify({
         title = 'リタイア',

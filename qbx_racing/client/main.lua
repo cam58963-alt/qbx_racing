@@ -711,34 +711,55 @@ end)
 -- NUIコールバック: ソロレース
 -- ===================================
 
--- レース開始
+-- レース開始（mode = 'daily' ならデイリーレースとして走る）
 RegisterNUICallback('startRace', function(data, cb)
     if not data or not data.raceId then
-        cb({})
+        cb({success = false, message = 'レースIDが指定されていません'})
         return
     end
     
-    DebugLog('Starting solo race: ' .. data.raceId)
+    local mode = data.mode == 'daily' and 'daily' or 'normal'
+    DebugLog('Starting solo race: ' .. data.raceId .. ' (' .. mode .. ')')
     
-    lib.callback('qbx_racing:getRaceDetails', false, function(race)
-        if race then
-            -- UIを閉じてレース開始
-            CloseMenuUI()
-            
-            TriggerEvent('qbx_racing:client:startSoloRace', race)
-            DebugLog('Solo race started successfully')
-        else
-            lib.notify({
-                title = 'エラー',
-                description = 'レース情報の取得に失敗しました',
-                type = 'error'
-            })
-            DebugLog('Failed to get race details')
+    -- デイリーは報酬が残っている時だけ出走できる
+    if mode == 'daily' then
+        local check = lib.callback.await('qbx_racing:server:canStartDaily', false, data.raceId)
+        if not check or not check.success then
+            cb({success = false, message = check and check.message or 'サーバーエラー'})
+            return
         end
-    end, data.raceId)
+    end
     
-    cb({})
+    local race = lib.callback.await('qbx_racing:getRaceDetails', false, data.raceId)
+    if not race then
+        cb({success = false, message = 'レース情報の取得に失敗しました'})
+        return
+    end
+    
+    -- UIを閉じてレース開始
+    cb({success = true})
+    CloseMenuUI()
+    race.playMode = mode
+    TriggerEvent('qbx_racing:client:startSoloRace', race)
+    DebugLog('Solo race started successfully')
 end)
+
+-- ===================================
+-- NUIコールバック: ホーム・タイムアタック・ランキング・管理
+-- ===================================
+local function ForwardCallback(nuiName, serverName, fallback)
+    RegisterNUICallback(nuiName, function(data, cb)
+        lib.callback(serverName, false, function(result)
+            cb(result or fallback)
+        end, data and data.raceId)
+    end)
+end
+
+ForwardCallback('getHomeData', 'qbx_racing:getHomeData', {error = true})
+ForwardCallback('getTimeAttack', 'qbx_racing:getTimeAttack', {error = true})
+ForwardCallback('getRanking', 'qbx_racing:getRanking', {error = true})
+ForwardCallback('adminResetTarget', 'qbx_racing:server:adminResetTarget', {success = false, message = 'サーバーエラー'})
+ForwardCallback('adminRerollDaily', 'qbx_racing:server:adminRerollDaily', {success = false, message = 'サーバーエラー'})
 
 -- ===================================
 -- NUIコールバック: マルチプレイヤー
@@ -1099,15 +1120,15 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
     -- 操作ガイドを左側に表示
     local function ShowCreationGuide()
         lib.showTextUI(
-            '🏁 <b>レース作成モード</b>: ' .. raceCreationData.name .. '<br><br>'
-            .. '[E] チェックポイント設置<br>'
-            .. '[R] 作成完了（最低 ' .. minCheckpoints .. '個）<br>'
-            .. '[ESC] 作成キャンセル<br>'
-            .. '[Backspace] 最後のポイント削除<br><br>'
-            .. '[←] [→] 今いる場所に曲がり角ガイド設置（左・右）<br>'
-            .. '[↑] [↓] 最後のガイドを横に長く・短く<br>'
-            .. '[Delete] 最後のガイド削除<br><br>'
-            .. '設置済み: <b>' .. #checkpoints .. '個</b> / ガイド: <b>' .. #turnGuides .. '個</b>',
+            '🏁 **レース作成モード**: ' .. raceCreationData.name .. '  \n  \n'
+            .. '[E] チェックポイント設置  \n'
+            .. '[R] 作成完了（最低 ' .. minCheckpoints .. '個）  \n'
+            .. '[ESC] 作成キャンセル  \n'
+            .. '[Backspace] 最後のポイント削除  \n  \n'
+            .. '[←] [→] 今いる場所に曲がり角ガイド設置（左・右）  \n'
+            .. '[↑] [↓] 最後のガイドを横に長く・短く  \n'
+            .. '[Delete] 最後のガイド削除  \n  \n'
+            .. '設置済み: **' .. #checkpoints .. '個** / ガイド: **' .. #turnGuides .. '個**',
         {
             position = "left-center",
             icon = 'map-marked-alt',
@@ -1318,7 +1339,8 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
                     end
                     
                     -- サーバーにレース作成リクエスト送信
-                    TriggerServerEvent('qbx_racing:server:createRace', {
+                    -- （チェックポイントが数百個あると大きくなるため、分割して送れる latent イベントを使う）
+                    TriggerLatentServerEvent('qbx_racing:server:createRace', 200000, {
                         name = raceCreationData.name,
                         description = raceCreationData.description,
                         vehicleType = raceCreationData.vehicleType,
@@ -1496,7 +1518,7 @@ RegisterNetEvent('qbx_racing:client:countdownTick', function(data)
     local countdown = data.countdown
     
     lib.showTextUI(
-        '⏱️ <b>' .. countdown .. '</b>',
+        '⏱️ **' .. countdown .. '**',
     {
         position = "top-center",
         icon = 'stopwatch',
@@ -1522,7 +1544,7 @@ RegisterNetEvent('qbx_racing:client:multiRaceStart', function(data)
     lib.hideTextUI()
     
     lib.showTextUI(
-        '🏁 <b>GO!</b>',
+        '🏁 **GO!**',
     {
         position = "top-center",
         icon = 'flag-checkered',

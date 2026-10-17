@@ -70,7 +70,14 @@ Config.VehicleTypes = {
         -- 0: Compacts, 1: Sedans, 2: SUVs, 3: Coupes, 4: Muscle, 5: Sports Classics
         -- 6: Sports, 7: Super, 8: Motorcycles, 9: Off-road, 10: Industrial
         -- 11: Utility, 12: Vans, 17: Service, 18: Emergency, 19: Military, 20: Commercial
-        allowedClasses = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 17, 18, 19, 20}
+        allowedClasses = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 17, 18, 19, 20},
+        -- サーバーで確認する車両の種類（GetVehicleType。細かいクラスはクライアントで確認）
+        serverTypes = {'automobile', 'bike'},
+        -- チェックポイント通過の報告を受け付ける距離（判定半径 + この値、メートル）
+        -- サーバーで見た位置は通信のぶん少し遅れるため、速い乗り物ほど大きめにする
+        progressDistanceMargin = 50.0,
+        -- 不正対策の最高速度（km/h）。これより速いゴール・移動は記録しない（もっと速い車があるサーバーは上げる）
+        maxSpeed = 300.0
     },
     
     heli = {
@@ -96,7 +103,10 @@ Config.VehicleTypes = {
         allowedClasses = {
             15, -- Helicopters
             16  -- Planes
-        }
+        },
+        serverTypes = {'heli', 'plane'},
+        progressDistanceMargin = 150.0, -- 速度が出る・高度もずれるため大きめ
+        maxSpeed = 450.0
     },
     
     boat = {
@@ -121,7 +131,10 @@ Config.VehicleTypes = {
         
         allowedClasses = {
             14  -- Boats
-        }
+        },
+        serverTypes = {'boat', 'submarine'},
+        progressDistanceMargin = 80.0,  -- 波で揺れるため車より大きめ
+        maxSpeed = 200.0
     }
 }
 
@@ -158,7 +171,7 @@ Config.Checkpoint = {
     radius = 10.0,              -- チェックポイントの半径（メートル）
     height = 5.0,               -- マーカーの高さ
     minCheckpoints = 3,         -- 最低必要なチェックポイント数
-    maxCheckpoints = 50,        -- 最大チェックポイント数
+    maxCheckpoints = 500,       -- 最大チェックポイント数
     maxTurnGuides = 50,         -- 手動設置できる曲がり角ガイドの最大数
     
     -- 作成モード設定
@@ -447,6 +460,81 @@ Config.Race = {
     
     currency = 'cash',            -- 使用通貨
     updateStats = true            -- 統計更新
+}
+
+-- ===================================
+-- タイムアタック（TA）
+-- レース作成後、calibrationRuns 回のゴール（calibrationDrivers 人以上）がそろうと、
+-- 各ドライバーのベストタイムの平均が「目標タイム」になる（極端に遅いベストは除く）。
+-- 目標タイム以内でゴールすると、1人1レースにつき1回だけ報酬がもらえる。
+-- ===================================
+Config.TimeAttack = {
+    enabled = true,
+    calibrationRuns = 10,          -- 目標タイムを決めるのに必要なゴール数
+    calibrationDrivers = 3,        -- そのうち必要なドライバーの人数（1人だけで目標タイムを決められないように）
+    calibrationOutlierFactor = 1.5, -- ベストタイムの中央値のこの倍より遅いベストは平均から除く
+
+    -- 報酬 = レート × unit（レートはコースの長さ・チェックポイントの密度・目標タイムから自動計算）
+    -- スコア = 距離(km) × distanceWeight
+    --        + 1kmあたりのチェックポイント数（最大 checkpointDensityCap）× checkpointDensityWeight
+    --        + 目標タイム(分) × timeWeight
+    --        + 低速ボーナス（細道・カーブが多く平均速度が低いコースほど加算）
+    -- ※ チェックポイントは数ではなく密度で見る（長いコースは数が多くなるが、長さは距離で数えているため）
+    -- レート = スコアを四捨五入して minRate ～ maxRate に収めたもの
+    reward = {
+        unit = 1000000,            -- レート1あたりの金額（100万）
+        minRate = 1,               -- 最低レート（100万）
+        maxRate = 15,              -- 最高レート（1500万）
+        distanceWeight = 0.5,      -- 1km ごとに +0.5
+        checkpointDensityWeight = 0.1, -- 1kmあたりのチェックポイント 1個 ごとに +0.1（例: 2kmに30個 = 15個/km → +1.5）
+        checkpointDensityCap = 30,     -- 密度はこの値までで数える（最大 +3.0）
+        timeWeight = 0.5,          -- 1分 ごとに +0.5
+        
+        -- 低速ボーナス = weight × (1 - 平均速度 / 基準速度)（平均速度が基準以上なら 0）
+        -- 平均速度 = コースの長さ ÷ 目標タイム。基準速度は車両タイプごと（ボートやヘリが元々遅い・速いぶんを補正）
+        -- 例: 自動車で 2km を 2分（時速60km）→ +1.0 / 5分（時速24km）→ +1.6
+        slowBonus = {
+            enabled = true,
+            weight = 2.0,
+            referenceSpeed = {     -- km/h
+                car = 120.0,
+                heli = 200.0,
+                boat = 80.0
+            }
+        }
+    }
+}
+
+-- ===================================
+-- デイリーレース
+-- 毎日サーバー共通で raceCount 個のレースをランダムに選ぶ（目標タイムが決まっているレースから）。
+-- 完走で報酬の finishShare、目標タイム以内で残り（1 - finishShare）。それぞれ1日1回。
+-- 両方受け取ったレースはその日はデイリーとして出走できない。
+-- ===================================
+Config.Daily = {
+    enabled = true,
+    raceCount = {min = 1, max = 2},  -- 1日に選ぶレース数（この範囲でランダム）
+    rewardMultiplier = 1.0,        -- デイリーの報酬総額 = そのレースの TA 報酬 × この倍率
+    finishShare = 1 / 3            -- 完走でもらえる割合（残りは目標タイムクリアで）
+}
+
+-- ===================================
+-- ランキング（ポイント）
+-- ===================================
+Config.Ranking = {
+    enabled = true,
+    startPoints = 1000,            -- 初期ポイント
+    solo = {
+        finish = 5,                -- ソロで完走（同じレースは1日1回まで）
+        beatTarget = 10,           -- ソロで目標タイム以内（同じレースは1日1回まで）
+        retire = -5                -- ソロでリタイア
+    },
+    multiplayer = {
+        -- 参加者同士でポイントをやり取りする。
+        -- 自分より下の順位（リタイアはゴールした人より下）の参加者1人につき、その人から pointsPerOpponent をもらう
+        pointsPerOpponent = 5
+    },
+    topCount = 50                  -- ランキングに表示する人数
 }
 
 -- ===================================
@@ -744,9 +832,10 @@ Config.Security = {
     -- チート対策
     antiCheat = {
         enabled = true,
-        maxSpeed = 500.0,          -- 最大速度（km/h）
-        teleportDetection = true,  -- テレポート検出
-        teleportThreshold = 100.0, -- テレポート判定距離（メートル）
+        maxSpeed = 500.0,          -- 最大速度（km/h）の既定値（車両タイプごとの maxSpeed が無い場合に使う）
+        teleportDetection = true,  -- テレポート検出（走行中の位置を checkInterval ごとに確認し、あり得ない移動をした走行は記録しない）
+        teleportThreshold = 100.0, -- テレポート判定の余裕（メートル）。許容距離 = この値 + maxSpeed × 経過時間
+        progressDistanceMargin = 100.0, -- チェックポイント通過の許容距離の既定値（車両タイプごとの progressDistanceMargin が無い場合に使う）
         checkInterval = 1000       -- チェック間隔（ミリ秒）
     },
     

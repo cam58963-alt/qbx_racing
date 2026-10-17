@@ -126,9 +126,12 @@ end
 
 -- 未払いの支払い予定を実行する（sessionId が nil なら全セッション分）
 -- sources: citizenid → source（オンラインの人に直接渡すため。無ければ citizenid で渡す）
-local function SettlePayouts(sessionId, sources)
+-- citizenid を指定すると、そのセッションのその人の分だけ（TA・デイリー報酬は session_id = 0 で共通のため）
+local function SettlePayouts(sessionId, sources, citizenid)
     local rows
-    if sessionId then
+    if sessionId and citizenid then
+        rows = MySQL.query.await('SELECT id, citizenid, amount, reason FROM qbx_race_payouts WHERE session_id = ? AND citizenid = ? AND paid = 0', {sessionId, citizenid})
+    elseif sessionId then
         rows = MySQL.query.await('SELECT id, citizenid, amount, reason FROM qbx_race_payouts WHERE session_id = ? AND paid = 0', {sessionId})
     else
         rows = MySQL.query.await('SELECT id, citizenid, amount, reason FROM qbx_race_payouts WHERE paid = 0')
@@ -166,6 +169,12 @@ end
 -- ソロレースの開始記録（サーバー側でタイムを確認するため）
 local soloRuns = {}
 
+-- 車両タイプごとの最高速度（km/h）。無ければ Security.antiCheat.maxSpeed
+local function GetMaxSpeedKmh(vehicleType)
+    return tonumber(GetConfigValue('VehicleTypes.' .. tostring(vehicleType) .. '.maxSpeed',
+        GetConfigValue('Security.antiCheat.maxSpeed', 500.0))) or 500.0
+end
+
 -- コースを最高速度で走っても必要な最短時間（これより速いゴールは不正とみなす）
 local function CalculateMinRaceTimeMs(race)
     if not GetConfigValue('Security.antiCheat.enabled', true) then return 0 end
@@ -176,22 +185,144 @@ local function CalculateMinRaceTimeMs(race)
         return #(vector3(a.x, a.y, a.z) - vector3(b.x, b.y, b.z))
     end
     
+    -- 区間ごとに、両端のチェックポイントの判定半径ぶんは近道できるとみなす（区間が短ければ 0）
+    -- （チェックポイントが密なコースでも合計がマイナスにならないよう区間ごとに計算する）
+    local function segment(a, b)
+        local radiusA, radiusB = tonumber(a.radius) or 10.0, tonumber(b.radius) or 10.0
+        return math.max(0, dist(a, b) - radiusA - radiusB)
+    end
     local lapDistance = 0
     for i = 2, #checkpoints do
-        lapDistance = lapDistance + dist(checkpoints[i - 1], checkpoints[i])
+        lapDistance = lapDistance + segment(checkpoints[i - 1], checkpoints[i])
     end
     -- 周回は毎周スタート地点（CP1）に戻る（最終周もスタート地点がゴール）
-    local closing = (race.race_type ~= 'sprint' and #checkpoints > 1) and dist(checkpoints[#checkpoints], checkpoints[1]) or 0
-    local total = lapDistance * laps + closing * laps
-    
-    -- チェックポイントの判定半径ぶんの近道を差し引く
-    for _, cp in ipairs(checkpoints) do
-        total = total - 2 * (tonumber(cp.radius) or 10.0) * laps
+    if race.race_type ~= 'sprint' and #checkpoints > 1 then
+        lapDistance = lapDistance + segment(checkpoints[#checkpoints], checkpoints[1])
     end
+    local total = lapDistance * laps
     
-    local maxSpeed = GetConfigValue('Security.antiCheat.maxSpeed', 500.0) / 3.6 -- km/h → m/s
+    local maxSpeed = GetMaxSpeedKmh(race.vehicle_type) / 3.6 -- km/h → m/s
     if total <= 0 or maxSpeed <= 0 then return 0 end
     return math.floor(total / maxSpeed * 1000)
+end
+
+-- サーバーで見たプレイヤーの位置（OneSync が無いなどで取れない場合は false。その場合は通過を認めない）
+local function GetServerPlayerCoords(src)
+    local ped = GetPlayerPed(src)
+    if not ped or ped == 0 then return false end
+    return GetEntityCoords(ped)
+end
+
+-- サーバーで見たプレイヤーの位置がチェックポイントの近くか
+-- coords: 報告が届いた時点の位置（省略すると今の位置）
+-- vehicleType: レースの車両タイプ（許容距離は車両タイプごと。速い乗り物ほどサーバーの位置とのずれが大きい）
+local function IsPlayerNearCheckpoint(src, cp, coords, vehicleType)
+    if not cp then return false end
+    if coords == nil then coords = GetServerPlayerCoords(src) end
+    -- 位置が取れない場合は通過を認めない（報酬の対象になる走行なので、確認できないものは受け付けない）
+    if not coords then return false end
+    local margin = GetConfigValue('VehicleTypes.' .. tostring(vehicleType) .. '.progressDistanceMargin',
+        GetConfigValue('Security.antiCheat.progressDistanceMargin', 100.0))
+    local allowed = (tonumber(cp.radius) or 10.0) + (tonumber(margin) or 100.0)
+    return #(coords - vector3(cp.x, cp.y, cp.z)) <= allowed
+end
+
+-- コース上の位置 index のチェックポイント（周回の index n+1 はスタート地点 = CP1）
+local function CourseCheckpointAt(checkpoints, index)
+    return checkpoints[index] or checkpoints[1]
+end
+
+-- ===================================
+-- レース中のテレポート検出
+-- 走り始めてからの移動距離の合計（確認した位置を順につないだ距離）が
+-- 「teleportThreshold + 最高速度 × 走り始めてからの時間」を超えたら、その走行は記録しない
+-- （余裕 teleportThreshold は走行全体で1回分だけ。確認のたびに余裕が増えて、少しずつ瞬間移動できないように）
+-- 位置は一定間隔の確認と、受け付けたチェックポイント・ゴールの報告のたびに記録する
+-- ===================================
+-- coords: その時点の位置（省略すると今の位置）
+-- deferCommit: true なら確認した位置を記録しない（報告が受け付けられた時だけ呼び出し側で記録する。
+--              受け付けられなかった報告を何度も送って、移動を記録させないように）
+-- 戻り値: テレポートしていなければ true, 記録する位置（deferCommit の時に呼び出し側で state.lastSample に入れる）
+local function CheckRacerMovement(src, state, now, coords, deferCommit)
+    if not GetConfigValue('Security.antiCheat.enabled', true) or not GetConfigValue('Security.antiCheat.teleportDetection', true) then
+        return true
+    end
+    coords = coords or GetServerPlayerCoords(src)
+    if not coords then return not state.teleported end
+    local last = state.lastSample
+    if not last then
+        -- 最初の位置が基準（ここからの合計で判定する）
+        local sample = {coords = coords, time = now, travelled = 0}
+        state.anchorTime = now
+        if not deferCommit then state.lastSample = sample end
+        return not state.teleported, sample
+    end
+    -- 読み込み中に届いた報告を後から確認する時は時刻が前後するため、時刻は後ろに戻さない
+    local time = math.max(now, last.time)
+    local travelled = last.travelled + #(coords - last.coords)
+    local sample = {coords = coords, time = time, travelled = travelled}
+    if not deferCommit then state.lastSample = sample end
+    if state.teleported then return false, sample end
+    
+    local seconds = (time - (state.anchorTime or last.time)) / 1000
+    local allowed = GetConfigValue('Security.antiCheat.teleportThreshold', 100.0)
+        + GetMaxSpeedKmh(state.vehicleType) / 3.6 * seconds
+    if travelled > allowed then
+        state.teleported = true
+        print(('^1[CAM Racing]^7 レース中のテレポートの可能性: src=%d 移動の合計=%.0fm / %.1f秒（許容 %.0fm）。この走行は記録しません'):format(
+            src, travelled, seconds, allowed))
+    end
+    return not state.teleported, sample
+end
+
+CreateThread(function()
+    while true do
+        Wait(math.max(250, ToInteger(GetConfigValue('Security.antiCheat.checkInterval', 1000)) or 1000))
+        do
+            local now = GetGameTimer()
+            for src, run in pairs(soloRuns) do
+                -- コースの読み込み中は確認しない（貯めた報告を後から順に確認するため、位置の順番が前後しないように）
+                if not run.pending then
+                    CheckRacerMovement(src, run, now)
+                end
+            end
+            for _, session in pairs(ActiveSessions) do
+                if session.status == 'racing' then
+                    for _, participant in ipairs(session.participants) do
+                        if participant.status == 'racing' and not participant.disconnected then
+                            CheckRacerMovement(participant.source, participant, now)
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- サーバーから見たプレイヤーの車両（位置が取れない環境では false = 確認しない、乗っていなければ 0）
+local function GetServerPlayerVehicle(src)
+    local ped = GetPlayerPed(src)
+    if not ped or ped == 0 then return false end
+    return GetVehiclePedIsIn(ped, false)
+end
+
+-- サーバーで分かる車両の種類（GetVehicleType）がレースの車両タイプに合うか
+-- （細かいクラスはサーバーでは取れないので、車のコースを飛行機で走るような違いを防ぐ）
+local DEFAULT_SERVER_VEHICLE_TYPES = {
+    car = {'automobile', 'bike'},
+    heli = {'heli', 'plane'},
+    boat = {'boat', 'submarine'}
+}
+local function IsServerVehicleAllowed(vehicle, raceVehicleType)
+    if not vehicle or vehicle == 0 then return false end
+    local vehicleType = GetVehicleType(vehicle)
+    if not vehicleType then return true end -- 種類が取れない場合は確認しない
+    local allowed = GetConfigValue('VehicleTypes.' .. tostring(raceVehicleType) .. '.serverTypes',
+        DEFAULT_SERVER_VEHICLE_TYPES[raceVehicleType] or DEFAULT_SERVER_VEHICLE_TYPES.car)
+    for _, name in ipairs(allowed) do
+        if name == vehicleType then return true end
+    end
+    return false
 end
 
 -- 曲がり角ガイド取得（手動設置分）
@@ -308,9 +439,9 @@ lib.callback.register('qbx_racing:server:registerDriver', function(source, data)
     
     -- 登録処理
     local success = MySQL.insert.await([[
-        INSERT INTO qbx_driver_profiles (citizenid, driver_name, total_races, total_wins) 
-        VALUES (?, ?, 0, 0)
-    ]], {Player.PlayerData.citizenid, driverName})
+        INSERT INTO qbx_driver_profiles (citizenid, driver_name, total_races, total_wins, points) 
+        VALUES (?, ?, 0, 0, ?)
+    ]], {Player.PlayerData.citizenid, driverName, ToInteger(GetConfigValue('Ranking.startPoints', 1000)) or 1000})
     
     if success then
         TriggerClientEvent('ox_lib:notify', source, {
@@ -905,6 +1036,8 @@ function RegisterSessionParticipant(sessionId, source, options)
     options = options or {}
     local Player = GetPlayer(source)
     if not Player then return false, 'プレイヤーデータが見つかりません' end
+    -- ソロで走行中は参加できない（1回の走行をソロとマルチの両方で記録させないため）
+    if soloRuns[source] then return false, 'ソロレースの走行中は参加できません' end
     local citizenid = Player.PlayerData.citizenid
     
     local profile = GetDriverProfile(citizenid)
@@ -942,8 +1075,9 @@ function RegisterSessionParticipant(sessionId, source, options)
     
     -- DB を待っている間に開始・満員・重複になっていないか確認
     local maxParticipants = GetConfigValue('Multiplayer.maxParticipants', 16)
+    -- ソロの走行を始めていないかもここで確認し直す（DB を待っている間にソロを始められないように）
     local canJoin = ActiveSessions[sessionId] == session and session.status == 'lobby'
-        and #session.participants < maxParticipants
+        and #session.participants < maxParticipants and not soloRuns[source]
     for _, participant in ipairs(session.participants) do
         if participant.citizenid == citizenid then canJoin = false end
     end
@@ -1173,7 +1307,11 @@ RegisterNetEvent('qbx_racing:server:startCountdown', function(sessionId)
             local vehicle = GetVehiclePedIsIn(GetPlayerPed(participant.source), false)
             local reported = ToInteger(info.netId) and NetworkGetEntityFromNetworkId(ToInteger(info.netId)) or 0
             if vehicle ~= 0 and reported == vehicle and allowedClasses[ToInteger(info.class)]
+                and IsServerVehicleAllowed(vehicle, session.race.vehicle_type)
                 and (not startCoords or #(GetEntityCoords(vehicle) - startCoords) <= startRadius) then
+                -- 進捗とゴールはこの車両でしか受け付けない（途中で乗り換えた走りは記録しない）
+                participant.raceVehicle = vehicle
+                participant.vehicleType = session.race.vehicle_type
                 table.insert(validParticipants, participant.source)
             end
         end
@@ -1455,17 +1593,28 @@ RegisterNetEvent('qbx_racing:server:updateProgress', function(sessionId, checkpo
     
     -- チェックポイントは1つずつ順番にしか進めない（飛ばした報告は受け付けない）
     -- 周回は CPn の次に n+1（スタート地点に戻る）、そこを通ると次の周の CP2
-    local nextCheckpoint, nextLap
+    local passedIndex, nextCheckpoint, nextLap
     if participant.currentCheckpoint < session.lapEndIndex then
-        nextCheckpoint, nextLap = participant.currentCheckpoint + 1, participant.currentLap
+        passedIndex, nextCheckpoint, nextLap = participant.currentCheckpoint, participant.currentCheckpoint + 1, participant.currentLap
     else
-        nextCheckpoint, nextLap = 2, participant.currentLap + 1
+        passedIndex, nextCheckpoint, nextLap = session.lapEndIndex, 2, participant.currentLap + 1
     end
+    if checkpoint ~= nextCheckpoint or lap ~= nextLap or lap > session.totalLaps then return end
     
-    if checkpoint == nextCheckpoint and lap == nextLap and lap <= session.totalLaps then
-        participant.currentCheckpoint = checkpoint
-        participant.currentLap = lap
+    -- スタート時の車両に乗っていること・前回の確認からあり得ない移動をしていないこと
+    if participant.raceVehicle and GetServerPlayerVehicle(src) ~= participant.raceVehicle then return end
+    local movementOk, sample = CheckRacerMovement(src, participant, GetGameTimer(), nil, true)
+    if not movementOk then return end
+    
+    -- 通過したチェックポイントの近くにいること（サーバーで見た位置で確認）
+    if not IsPlayerNearCheckpoint(src, CourseCheckpointAt(session.race.checkpoints or {}, passedIndex), nil, session.race.vehicle_type) then
+        print(('^3[CAM Racing]^7 チェックポイント通過を受け付けませんでした（位置が離れています）: %s session=%d CP=%d'):format(
+            participant.driverName, sessionId, passedIndex))
+        return
     end
+    if sample then participant.lastSample = sample end
+    participant.currentCheckpoint = checkpoint
+    participant.currentLap = lap
 end)
 
 -- ===================================
@@ -1481,7 +1630,9 @@ RegisterNetEvent('qbx_racing:server:finishMultiRace', function(sessionId, timeMs
     if not finisher or finisher.status ~= 'racing' then return end
     
     -- 最終周のゴール直前まで順番に通過したか（サーバーが受け取った進捗で確認。ゴールの通過はこの報告自体）
-    if finisher.currentLap ~= session.totalLaps or finisher.currentCheckpoint ~= session.lapEndIndex then
+    if not CheckRacerMovement(src, finisher, GetGameTimer(), nil, true) or finisher.currentLap ~= session.totalLaps or finisher.currentCheckpoint ~= session.lapEndIndex
+        or (finisher.raceVehicle and GetServerPlayerVehicle(src) ~= finisher.raceVehicle)
+        or not IsPlayerNearCheckpoint(src, CourseCheckpointAt(session.race.checkpoints or {}, session.lapEndIndex), nil, session.race.vehicle_type) then
         print(('^3[CAM Racing]^7 ゴールを受け付けませんでした（チェックポイント未通過）: %s session=%d'):format(
             finisher.driverName, sessionId))
         return
@@ -1522,8 +1673,8 @@ RegisterNetEvent('qbx_racing:server:finishMultiRace', function(sessionId, timeMs
             values = {timeMs, position, sessionId, finisher.citizenid}
         },
         {
-            query = 'INSERT INTO qbx_race_times (race_id, driver_name, citizenid, time_ms, vehicle_model) VALUES (?, ?, ?, ?, ?)',
-            values = {session.raceId, finisher.driverName, finisher.citizenid, timeMs, vehicleModel}
+            query = 'INSERT INTO qbx_race_times (race_id, driver_name, citizenid, time_ms, server_time_ms, vehicle_model) VALUES (?, ?, ?, ?, ?, ?)',
+            values = {session.raceId, finisher.driverName, finisher.citizenid, timeMs, serverElapsed, vehicleModel}
         }
     }
     if GetConfigValue('Race.updateStats', true) then
@@ -1532,7 +1683,10 @@ RegisterNetEvent('qbx_racing:server:finishMultiRace', function(sessionId, timeMs
             values = {position == 1 and 1 or 0, finisher.citizenid}
         }
     end
-    if not MySQL.transaction.await(finishQueries) then
+    -- 保存中のゴールがある間はレースを終了しない（終了の精算で、保存に失敗した記録を一緒に保存し直すため）
+    session.savingFinishes = (session.savingFinishes or 0) + 1
+    local finishSaved = MySQL.transaction.await(finishQueries)
+    if not finishSaved then
         -- 保存できなかった記録は、レース終了時の精算（賞金の記録と同じトランザクション）でもう一度保存する
         -- （そこでも保存できなければ賞金も確定しない）
         print(('^1[CAM Racing]^7 %s のゴール記録を保存できませんでした（session=%d、終了時に再保存します）'):format(
@@ -1541,6 +1695,13 @@ RegisterNetEvent('qbx_racing:server:finishMultiRace', function(sessionId, timeMs
         for _, query in ipairs(finishQueries) do
             table.insert(session.pendingFinishQueries, query)
         end
+    end
+    session.savingFinishes = session.savingFinishes - 1
+    
+    if finishSaved and Progression then
+        -- タイムアタックの目標タイム（最初の数回のゴールの平均）の計算
+        local ok, err = pcall(Progression.UpdateTargetTime, session.raceId)
+        if not ok then print('^1[CAM Racing]^7 目標タイムの計算に失敗しました: ' .. tostring(err)) end
     end
     
     -- 完了通知（賞金はレース終了時にまとめて支払う）
@@ -1582,6 +1743,9 @@ function CheckSessionComplete(sessionId)
     local session = ActiveSessions[sessionId]
     if not session or session.status ~= 'racing' then return end
     
+    -- ゴールの記録を保存中なら、保存が終わった時の確認（finishMultiRace の最後）に任せる
+    if (session.savingFinishes or 0) > 0 then return end
+    
     for _, participant in ipairs(session.participants) do
         if participant.status == 'racing' then
             return
@@ -1598,7 +1762,24 @@ function CheckSessionComplete(sessionId)
     for _, query in ipairs(session.pendingFinishQueries or {}) do
         table.insert(extraQueries, query)
     end
+    -- ランキング: 参加者同士のポイントのやり取りも同じトランザクションで保存する
+    -- （結果が保存できなかったレースはポイントも動かない）
+    local rankingRefs = {}
+    if Progression then
+        local ok, queries, refs = pcall(Progression.BuildMultiplayerRanking, session)
+        if ok then
+            for _, query in ipairs(queries or {}) do table.insert(extraQueries, query) end
+            rankingRefs = refs or {}
+        else
+            print('^1[CAM Racing]^7 ランキングの計算に失敗しました: ' .. tostring(queries))
+        end
+    end
     if RecordPayouts(sessionId, payouts, extraQueries) then
+        -- 表示するポイント変動は、実際に保存された値（履歴）から読む
+        for participant, ref in pairs(rankingRefs) do
+            local ok, delta = pcall(Progression.ReadRankingDelta, ref)
+            participant.pointsDelta = ok and delta or nil
+        end
         SettlePayouts(sessionId, SessionSources(session))
         PayHouseCut(session)
     else
@@ -1718,6 +1899,13 @@ end)
 
 -- (FormatMoney はヘルパー関数セクションで定義済み)
 
+-- ランキングのポイント変動の表示（「 +10pt」など。変動なしは空）
+function FormatPointsDelta(delta)
+    delta = ToInteger(delta)
+    if not delta or delta == 0 then return '' end
+    return string.format(' [%s%dpt]', delta > 0 and '+' or '', delta)
+end
+
 -- 最終結果発表
 function BroadcastFinalResults(sessionId)
     local session = ActiveSessions[sessionId]
@@ -1745,10 +1933,11 @@ function BroadcastFinalResults(sessionId)
         local medal = medals[i] or (i .. '位')
         local time = participant.finishTime and string.format("%.2f秒", participant.finishTime / 1000) or 'DNF'
         local prize = participant.prize and string.format('（賞金 $%s）', FormatMoney(participant.prize)) or ''
-        summary = summary .. string.format('%s %s - %s%s\n', medal, participant.driverName, time, prize)
+        summary = summary .. string.format('%s %s - %s%s%s\n', medal, participant.driverName, time, prize,
+            FormatPointsDelta(participant.pointsDelta))
     end
     for _, participant in ipairs(retired) do
-        summary = summary .. string.format('DNF %s\n', participant.driverName)
+        summary = summary .. string.format('DNF %s%s\n', participant.driverName, FormatPointsDelta(participant.pointsDelta))
     end
     
     if session.isBetMode and session.prizePool > 0 then
@@ -1777,21 +1966,212 @@ end
 
 -- ソロレース完了処理
 
+-- ソロのコース上の位置 index のチェックポイント（周回の index n+1 はスタート地点 = CP1）
+local function SoloCheckpointAt(run, index)
+    return CourseCheckpointAt(run.checkpoints, index)
+end
+
+-- ソロの走行をリタイア扱いにしてランキングのペナルティを適用する
+-- （1つの走行につき1回だけ。ゴールが確定した走行には適用しない）
+local function PenalizeSoloRun(src, run)
+    if not run or run.penalized or run.finishValidated or not Progression then return end
+    local citizenid = run.citizenid
+    if not citizenid then
+        local Player = GetPlayer(src)
+        citizenid = Player and Player.PlayerData.citizenid
+    end
+    if not citizenid then return end
+    run.penalized = true
+    local ok, err = pcall(Progression.OnSoloRaceRetired, src, citizenid, run.raceId)
+    if not ok then print('^1[CAM Racing]^7 リタイアの処理に失敗しました: ' .. tostring(err)) end
+end
+
+-- ソロで、スタート時の車両に乗ったままか（位置が取れない環境では確認しない）
+-- vehicle: 確認する車両（省略すると今乗っている車両）
+local function IsInSoloRunVehicle(src, run, vehicle)
+    if not run.vehicle then return true end
+    if vehicle == nil then vehicle = GetServerPlayerVehicle(src) end
+    return vehicle == run.vehicle
+end
+
 -- ソロレース開始（GO の瞬間にクライアントから届く）
-RegisterNetEvent('qbx_racing:server:soloRaceStarted', function(raceId)
+-- mode: 'daily' ならデイリーレースとして走る（その日のデイリーで、報酬が残っている場合のみ）
+RegisterNetEvent('qbx_racing:server:soloRaceStarted', function(raceId, mode)
     local src = source
+    local startedAt = GetGameTimer()
+    -- 車両はイベントが届いた時点のものを使う（コースを読み込む間に乗り換えても、スタート時の車両で判定する）
+    local vehicle = GetServerPlayerVehicle(src)
     raceId = ToInteger(raceId)
     if not raceId then return end
-    soloRuns[src] = {raceId = raceId, startedAt = GetGameTimer()}
+    
+    -- 走行中のソロを終わらせずに次を始めた場合は、前の走行をリタイア扱いにする
+    -- （通常の画面からは走行中に次のレースを始められないため、リタイアのペナルティを避ける操作になる）
+    local previous = soloRuns[src]
+    soloRuns[src] = nil
+    PenalizeSoloRun(src, previous)
+    
+    -- マルチのセッションに参加中・参加処理中はソロを始められない（1回の走行をソロとマルチの両方で記録させないため）
+    -- ※ この確認から soloRuns に登録するまでの間に待ち（DB など）を入れないこと
+    if FindPlayerActiveSession(src) or busyPlayers[src] then
+        TriggerClientEvent('ox_lib:notify', src, {
+            title = '記録なし',
+            description = 'マルチのセッションに参加中のため、ソロのタイムは記録されません',
+            type = 'error'
+        })
+        return
+    end
+    
+    -- コースを読み込む間に届いた通過報告は pending に貯めて、読み込み後に順番に確認する
+    -- （スタート直後にスタート地点を通過した報告がすぐ届くため）
+    local run = {raceId = raceId, startedAt = startedAt, daily = false, pending = {}, checkpoint = 1, lap = 1}
+    soloRuns[src] = run
+    local startCoords = GetServerPlayerCoords(src)
+    if startCoords then
+        run.lastSample = {coords = startCoords, time = startedAt, travelled = 0}
+        run.anchorTime = startedAt
+    end
+    -- 切断時のリタイア処理のため（切断後はプレイヤー情報が取れない）
+    local starter = GetPlayer(src)
+    run.citizenid = starter and starter.PlayerData.citizenid
+    
+    -- 通過の確認に使うコース（チェックポイントは順番にしか進めない。ゴールはサーバーが確認した進捗が最終地点の時だけ）
+    local race = MySQL.single.await('SELECT vehicle_type, race_type, laps FROM qbx_races WHERE id = ? AND is_active = 1', {raceId})
+    local checkpoints = race and MySQL.query.await([[
+        SELECT x, y, z, radius FROM qbx_race_checkpoints WHERE race_id = ? ORDER BY checkpoint_order ASC
+    ]], {raceId}) or {}
+    if soloRuns[src] ~= run then return end
+    if #checkpoints == 0 then
+        soloRuns[src] = nil
+        return
+    end
+    
+    -- 乗っている車両の種類をサーバーで確認し、その車両で最後まで走ったかを見るため覚えておく
+    if vehicle ~= false then
+        if not IsServerVehicleAllowed(vehicle, race.vehicle_type) then
+            soloRuns[src] = nil
+            TriggerClientEvent('ox_lib:notify', src, {
+                title = '記録なし',
+                description = 'このレースの対象外の車両のため、タイムは記録されません',
+                type = 'error'
+            })
+            return
+        end
+        run.vehicle = vehicle
+    end
+    
+    -- デイリーかどうかもゴールを受け付ける前に決めておく
+    if mode == 'daily' and Progression then
+        local Player = GetPlayer(src)
+        local ok, playable, daily, day = pcall(Progression.IsDailyPlayable, Player and Player.PlayerData.citizenid, raceId)
+        if ok and playable then
+            run.daily = {day = day, race = daily}
+        else
+            TriggerClientEvent('ox_lib:notify', src, {
+                title = 'デイリーレース',
+                description = '今日のデイリー報酬が残っていないため、通常の走行として記録します',
+                type = 'inform'
+            })
+        end
+    end
+    if soloRuns[src] ~= run then return end
+    
+    local isSprint = race.race_type == 'sprint'
+    run.vehicleType = race.vehicle_type
+    run.checkpoints = checkpoints
+    run.totalLaps = isSprint and 1 or math.max(1, ToInteger(race.laps) or 1)
+    run.lapEndIndex = isSprint and #checkpoints or #checkpoints + 1
+    local pending = run.pending
+    run.pending = nil
+    for _, report in ipairs(pending) do
+        ApplySoloProgress(src, run, report[1], report[2], report[3], report[4], report[5])
+    end
+end)
+
+-- ソロのチェックポイント通過報告（checkpoint は次に向かう位置）
+RegisterNetEvent('qbx_racing:server:soloProgress', function(raceId, checkpoint, lap)
+    local src = source
+    local run = soloRuns[src]
+    checkpoint, lap = ToInteger(checkpoint), ToInteger(lap)
+    if not run or run.raceId ~= ToInteger(raceId) or not checkpoint or not lap then return end
+    if run.pending then
+        -- まだコースを読み込み中
+        -- 位置は報告が届いた時点のものを使う（読み込み後の位置で確認すると先に進んだぶん離れてしまう）
+        -- 上限は一番長いコース（チェックポイント最大数 + スタート地点）× 最大周回数
+        local maxReports = (GetConfigValue('Checkpoint.maxCheckpoints', 50) + 1) * GetConfigValue('RaceTypes.circuit.maxLaps', 10)
+        if #run.pending < maxReports then
+            run.pending[#run.pending + 1] = {checkpoint, lap, GetServerPlayerCoords(src), GetServerPlayerVehicle(src), GetGameTimer()}
+        end
+        return
+    end
+    ApplySoloProgress(src, run, checkpoint, lap)
+end)
+
+-- coords / vehicle: 報告が届いた時点の位置と車両（省略すると今の位置と車両）
+function ApplySoloProgress(src, run, checkpoint, lap, coords, vehicle, receivedAt)
+    -- 1つずつ順番にしか進めない（周回は index n+1 = スタート地点を通ると次の周の CP2）
+    local passedIndex, nextCheckpoint, nextLap
+    if run.checkpoint < run.lapEndIndex then
+        passedIndex, nextCheckpoint, nextLap = run.checkpoint, run.checkpoint + 1, run.lap
+    else
+        passedIndex, nextCheckpoint, nextLap = run.lapEndIndex, 2, run.lap + 1
+    end
+    if checkpoint ~= nextCheckpoint or lap ~= nextLap or lap > run.totalLaps then return end
+    
+    -- チェックポイントはスタート時の車両でしか通過できない（クライアントも同じ判定）
+    if not IsInSoloRunVehicle(src, run, vehicle) then
+        print(('^3[CAM Racing]^7 チェックポイント通過を受け付けませんでした（スタート時の車両ではありません）: src=%d race=%d'):format(
+            src, run.raceId))
+        return
+    end
+    local movementOk, sample = CheckRacerMovement(src, run, receivedAt or GetGameTimer(), coords or nil, true)
+    if not movementOk then return end
+    if not IsPlayerNearCheckpoint(src, SoloCheckpointAt(run, passedIndex), coords, run.vehicleType) then
+        print(('^3[CAM Racing]^7 チェックポイント通過を受け付けませんでした（位置が離れています）: src=%d race=%d CP=%d'):format(
+            src, run.raceId, passedIndex))
+        return
+    end
+    if sample then run.lastSample = sample end
+    run.checkpoint, run.lap = checkpoint, lap
+end
+
+-- ソロレースのリタイア（走行中のみ。ランキングのポイントが下がる）
+RegisterNetEvent('qbx_racing:server:soloRaceRetired', function(raceId)
+    local src = source
+    local run = soloRuns[src]
+    if not run or run.raceId ~= ToInteger(raceId) then return end
+    soloRuns[src] = nil
+    PenalizeSoloRun(src, run)
 end)
 
 RegisterNetEvent('qbx_racing:server:finishRace', function(raceId, timeMs, vehicleModel)
     local src = source
     local run = soloRuns[src]
-    soloRuns[src] = nil
     raceId = ToInteger(raceId)
-    if not run or run.raceId ~= raceId then return end
+    if not run or run.raceId ~= raceId or run.finishing then return end
+    run.finishing = true
     local serverElapsed = GetGameTimer() - run.startedAt
+    
+    -- コースの読み込み（デイリーの判定を含む）が終わっていなければ待つ（短いコースや DB が遅い時）
+    local waitUntil = GetGameTimer() + 5000
+    while run.pending and soloRuns[src] == run and GetGameTimer() < waitUntil do
+        Wait(50)
+    end
+    if soloRuns[src] == run then soloRuns[src] = nil end
+    
+    -- 最終周のゴール直前まで順番に通過していて、スタート時の車両でゴール地点にいること（サーバーが確認した進捗で判断）
+    if run.pending or not CheckRacerMovement(src, run, GetGameTimer(), nil, true) or not run.lapEndIndex or run.lap ~= run.totalLaps or run.checkpoint ~= run.lapEndIndex
+        or not IsInSoloRunVehicle(src, run)
+        or not IsPlayerNearCheckpoint(src, SoloCheckpointAt(run, run.lapEndIndex), nil, run.vehicleType) then
+        print(('^3[CAM Racing]^7 ソロのゴールを受け付けませんでした（チェックポイント未通過）: src=%d race=%d'):format(src, raceId))
+        TriggerClientEvent('ox_lib:notify', src, {
+            title = '記録なし',
+            description = 'チェックポイントの通過を確認できなかったため、タイムは記録されませんでした',
+            type = 'error'
+        })
+        -- 受け付けられなかったゴールはリタイア扱い（途中で投げ出してペナルティを避けられないように）
+        PenalizeSoloRun(src, run)
+        return
+    end
     
     local Player = GetPlayer(src)
     if not Player then return end
@@ -1800,7 +2180,7 @@ RegisterNetEvent('qbx_racing:server:finishRace', function(raceId, timeMs, vehicl
     if not profile then return end
     
     -- 削除済みのレースには記録しない
-    local race = MySQL.single.await('SELECT id, race_type, laps FROM qbx_races WHERE id = ? AND is_active = 1', {raceId})
+    local race = MySQL.single.await('SELECT id, name, vehicle_type, race_type, laps, target_time_ms, ta_reward FROM qbx_races WHERE id = ? AND is_active = 1', {raceId})
     if not race then return end
     race.checkpoints = MySQL.query.await([[
         SELECT x, y, z, radius FROM qbx_race_checkpoints WHERE race_id = ? ORDER BY checkpoint_order ASC
@@ -1811,8 +2191,11 @@ RegisterNetEvent('qbx_racing:server:finishRace', function(raceId, timeMs, vehicl
     if serverElapsed < minTime then
         print(('^1[CAM Racing]^7 不正なソロ記録の可能性: %s race=%d 経過=%dms 最短=%dms'):format(
             profile.driver_name, raceId, serverElapsed, minTime))
+        PenalizeSoloRun(src, run)
         return
     end
+    -- ここまでの確認をすべて通ったゴールだけ確定（確定した走行にはリタイアのペナルティをかけない）
+    run.finishValidated = true
     
     -- タイムはサーバーの経過時間と大きくずれていればサーバー側の値を使う
     timeMs = ToInteger(timeMs)
@@ -1824,23 +2207,38 @@ RegisterNetEvent('qbx_racing:server:finishRace', function(raceId, timeMs, vehicl
         vehicleModel = '不明'
     end
     
-    -- タイム記録のみ
-    MySQL.insert.await([[
-        INSERT INTO qbx_race_times (race_id, driver_name, citizenid, time_ms, vehicle_model) 
-        VALUES (?, ?, ?, ?, ?)
-    ]], {raceId, profile.driver_name, Player.PlayerData.citizenid, timeMs, vehicleModel})
+    -- タイム記録
+    local timeSaved = MySQL.insert.await([[
+        INSERT INTO qbx_race_times (race_id, driver_name, citizenid, time_ms, server_time_ms, vehicle_model) 
+        VALUES (?, ?, ?, ?, ?, ?)
+    ]], {raceId, profile.driver_name, Player.PlayerData.citizenid, timeMs, serverElapsed, vehicleModel})
     
     -- 統計更新
-    if GetConfigValue('Race.updateStats', true) then
+    if timeSaved and GetConfigValue('Race.updateStats', true) then
         MySQL.query.await('UPDATE qbx_driver_profiles SET total_races = total_races + 1 WHERE citizenid = ?', {Player.PlayerData.citizenid})
     end
     
-    -- 通知（報酬なし）
-    local timeFormatted = string.format("%.2f秒", timeMs / 1000)
+    -- タイムアタック・デイリーの報酬とランキング（記録を保存できたときだけ）
+    local lines = {string.format('タイム: %.2f秒', timeMs / 1000)}
+    if not timeSaved then
+        lines[#lines + 1] = '⚠️ 記録を保存できませんでした'
+    elseif Progression then
+        -- 報酬・ランキングの判定はサーバーで測った経過時間より速くならない値で行う
+        -- （記録するタイムはクライアントの値でも、報酬の判定で数秒縮められないように）
+        local judgedTimeMs = math.max(timeMs, serverElapsed)
+        local ok, result = pcall(Progression.OnSoloRaceFinished, src, Player.PlayerData.citizenid, race, judgedTimeMs, run.daily)
+        if ok then
+            for _, line in ipairs(result or {}) do lines[#lines + 1] = line end
+        else
+            print('^1[CAM Racing]^7 報酬・ランキングの処理に失敗しました: ' .. tostring(result))
+        end
+    end
+    
     TriggerClientEvent('ox_lib:notify', src, {
-        title = 'タイム記録完了',
-        description = timeFormatted .. '（練習モード - 報酬なし）',
-        type = 'inform'
+        title = '🏁 ゴール！ ' .. tostring(race.name or ''),
+        description = table.concat(lines, '\n'),
+        type = 'success',
+        duration = 12000
     })
     
     TriggerClientEvent('qbx_racing:client:updateRaces', -1)
@@ -2050,6 +2448,7 @@ local SCHEMA_TABLES = {
             `driver_name` VARCHAR(50) UNIQUE NOT NULL,
             `total_races` INT DEFAULT 0,
             `total_wins` INT DEFAULT 0,
+            `points` INT DEFAULT 1000,
             `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             INDEX `idx_driver_name` (`driver_name`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
@@ -2066,6 +2465,11 @@ local SCHEMA_TABLES = {
             `max_participants` INT DEFAULT 16,
             `creator_driver_name` VARCHAR(50),
             `is_active` TINYINT(1) DEFAULT 1,
+            `target_time_ms` INT NULL,
+            `ta_reward` INT NULL,
+            `ta_rate` INT NULL,
+            `ta_calib_after_id` INT DEFAULT 0,
+            `course_length_m` FLOAT NULL,
             `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             INDEX `idx_vehicle_type` (`vehicle_type`),
             INDEX `idx_race_type` (`race_type`),
@@ -2104,6 +2508,7 @@ local SCHEMA_TABLES = {
             `driver_name` VARCHAR(50) NOT NULL,
             `citizenid` VARCHAR(50) NOT NULL,
             `time_ms` INT NOT NULL,
+            `server_time_ms` INT NULL,
             `vehicle_model` VARCHAR(50) NOT NULL,
             `completed_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             INDEX `idx_race_time` (`race_id`, `time_ms`),
@@ -2185,6 +2590,51 @@ local SCHEMA_TABLES = {
             INDEX `idx_unpaid` (`paid`),
             INDEX `idx_session` (`session_id`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ]],
+    [[
+        CREATE TABLE IF NOT EXISTS `qbx_ta_claims` (
+            `id` INT AUTO_INCREMENT PRIMARY KEY,
+            `citizenid` VARCHAR(50) NOT NULL,
+            `race_id` INT NOT NULL,
+            `time_ms` INT NOT NULL,
+            `reward` INT NOT NULL,
+            `claimed_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY `unique_claim` (`citizenid`, `race_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ]],
+    [[
+        CREATE TABLE IF NOT EXISTS `qbx_daily_races` (
+            `day` DATE NOT NULL,
+            `slot` INT NOT NULL,
+            `race_id` INT NOT NULL,
+            `target_time_ms` INT NOT NULL,
+            `reward` INT NOT NULL,
+            PRIMARY KEY (`day`, `slot`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ]],
+    [[
+        CREATE TABLE IF NOT EXISTS `qbx_daily_claims` (
+            `day` DATE NOT NULL,
+            `citizenid` VARCHAR(50) NOT NULL,
+            `race_id` INT NOT NULL,
+            `kind` VARCHAR(10) NOT NULL,
+            `amount` INT NOT NULL,
+            `claimed_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`day`, `citizenid`, `race_id`, `kind`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ]],
+    [[
+        CREATE TABLE IF NOT EXISTS `qbx_ranking_log` (
+            `id` INT AUTO_INCREMENT PRIMARY KEY,
+            `citizenid` VARCHAR(50) NOT NULL,
+            `delta` INT NOT NULL,
+            `reason` VARCHAR(50) NOT NULL,
+            `race_id` INT NULL,
+            `ref` VARCHAR(64) NULL,
+            `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX `idx_citizen_time` (`citizenid`, `created_at`),
+            INDEX `idx_ref` (`ref`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     ]]
 }
 
@@ -2201,7 +2651,20 @@ local SCHEMA_COLUMNS = {
     {'qbx_race_sessions', 'house_cut', "INT DEFAULT 0 AFTER `sponsor_name`"},
     {'qbx_session_participants', 'entry_paid', "TINYINT(1) DEFAULT 0 AFTER `final_position`"},
     {'qbx_session_participants', 'prize_amount', "INT DEFAULT 0 AFTER `entry_paid`"},
-    {'qbx_race_turn_guides', 'segments', "INT DEFAULT 1 AFTER `direction`"}
+    {'qbx_race_turn_guides', 'segments', "INT DEFAULT 1 AFTER `direction`"},
+    -- タイムアタック（目標タイム・報酬）。目標タイムはサーバーで測った経過時間から計算する
+    {'qbx_race_times', 'server_time_ms', "INT NULL AFTER `time_ms`"},
+    {'qbx_ranking_log', 'ref', "VARCHAR(64) NULL AFTER `race_id`, ADD INDEX `idx_ref` (`ref`)"},
+    {'qbx_races', 'target_time_ms', "INT NULL"},
+    {'qbx_races', 'ta_reward', "INT NULL"},
+    {'qbx_races', 'ta_rate', "INT NULL"},
+    {'qbx_races', 'ta_calib_after_id', "INT DEFAULT 0"},
+    {'qbx_races', 'course_length_m', "FLOAT NULL"},
+    -- ランキングのポイント（既存のプロフィールは設定の初期ポイントで埋める）
+    {'qbx_driver_profiles', 'points', "INT DEFAULT 1000 AFTER `total_wins`", function()
+        MySQL.update.await('UPDATE qbx_driver_profiles SET points = ?',
+            {ToInteger(GetConfigValue('Ranking.startPoints', 1000)) or 1000})
+    end}
 }
 
 -- 1つずつ実行して、失敗したものはログに出して続ける。戻り値: すべて成功したら true
@@ -2229,6 +2692,7 @@ local function EnsureDatabaseSchema()
             ]], {column[1], column[2]})
             if tonumber(exists) == 0 then
                 MySQL.query.await(('ALTER TABLE `%s` ADD COLUMN `%s` %s'):format(column[1], column[2], column[3]))
+                if column[4] then column[4]() end
             end
         end)
     end
@@ -2362,7 +2826,12 @@ end)
 AddEventHandler('playerDropped', function(reason)
     local src = source
     busyPlayers[src] = nil
+    
+    -- ソロの走行中に切断したらリタイア扱い（切断して投げ出すとペナルティを避けられないように）
+    -- （ゴールの確認中に切断した場合も、ゴールが確定していなければリタイア扱い）
+    local droppedRun = soloRuns[src]
     soloRuns[src] = nil
+    PenalizeSoloRun(src, droppedRun)
     
     local sessionIds = {}
     for sessionId in pairs(ActiveSessions) do
@@ -2393,3 +2862,17 @@ AddEventHandler('playerDropped', function(reason)
         end
     end
 end)
+
+-- ===================================
+-- server/progression.lua（タイムアタック・デイリー・ランキング）と共有する関数
+-- ===================================
+RacingServer = {
+    GetConfigValue = GetConfigValue,
+    FormatMoney = FormatMoney,
+    GetPlayer = GetPlayer,
+    ToInteger = ToInteger,
+    GetDriverProfile = GetDriverProfile,
+    HasRacePermission = HasRacePermission,
+    RecordPayouts = RecordPayouts,
+    SettlePayouts = SettlePayouts
+}

@@ -19,7 +19,7 @@
             <div class="race-hud-stats">
                 <div class="hud-stat">
                     <i class="fas fa-stopwatch"></i>
-                    <span id="hud-time">0.00s</span>
+                    <span id="hud-time">0.00秒</span>
                 </div>
                 <div class="hud-stat" id="hud-position-row" style="display: none;">
                     <i class="fas fa-trophy"></i>
@@ -71,13 +71,55 @@
                     </div>
                     <div class="driver-info">
                         <i class="fas fa-id-badge"></i>
-                        <span id="current-driver-name" class="driver-name">Loading...</span>
+                        <span id="current-driver-name" class="driver-name">読み込み中...</span>
                         <button id="edit-driver-btn" class="btn-icon" title="名前を変更">
                             <i class="fas fa-pen"></i>
                         </button>
+                        <span id="header-points" class="header-points" style="display: none;"></span>
                     </div>
                 </div>
-                <div class="header-right">
+                <!-- タブ -->
+                <nav class="tab-bar" id="tab-bar">
+                    <button class="tab-btn active" data-tab="home"><i class="fas fa-house"></i> ホーム</button>
+                    <button class="tab-btn" data-tab="races"><i class="fas fa-flag-checkered"></i> レース一覧</button>
+                    <button class="tab-btn" data-tab="ta"><i class="fas fa-stopwatch"></i> タイムアタック</button>
+                    <button class="tab-btn" data-tab="ranking"><i class="fas fa-trophy"></i> ランキング</button>
+                    <button class="tab-btn" data-tab="admin" id="admin-tab-btn" style="display: none;"><i class="fas fa-screwdriver-wrench"></i> 管理</button>
+                </nav>
+            </div>
+
+            <!-- ===== ホーム ===== -->
+            <section id="tab-home" class="tab-panel active">
+                <div class="home-grid">
+                    <div class="home-main">
+                        <div class="profile-card" id="home-profile"></div>
+                        <div class="section-title">
+                            <h3><i class="fas fa-calendar-day"></i> 今日のデイリーレース</h3>
+                            <span class="section-sub" id="daily-day"></span>
+                        </div>
+                        <p class="section-desc">サーバー共通で毎日選ばれるレースです。完走で報酬の1/3、目標タイム以内で残りの2/3がもらえます（それぞれ1日1回）。</p>
+                        <div class="daily-list" id="daily-list"></div>
+                    </div>
+                    <div class="home-side">
+                        <div class="side-card">
+                            <h3><i class="fas fa-trophy"></i> ランキング TOP 5</h3>
+                            <div id="home-top"></div>
+                        </div>
+                        <div class="side-card">
+                            <h3><i class="fas fa-chart-line"></i> 最近のポイント変動</h3>
+                            <div id="home-recent"></div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ===== レース一覧 ===== -->
+            <section id="tab-races" class="tab-panel">
+                <div class="toolbar">
+                    <div class="search-bar">
+                        <i class="fas fa-search search-icon"></i>
+                        <input type="text" id="search-input" placeholder="レース名または作成者で検索...">
+                    </div>
                     <div class="filter-group">
                         <button class="filter-btn active" data-filter="all">
                             <i class="fas fa-globe"></i> すべて
@@ -93,36 +135,66 @@
                         </button>
                     </div>
                 </div>
-            </div>
 
-            <!-- 検索バー -->
-            <div class="search-bar">
-                <i class="fas fa-search search-icon"></i>
-                <input type="text" id="search-input" placeholder="レース名またはドライバー名で検索...">
-            </div>
+                <!-- レースグリッド -->
+                <div class="race-grid" id="race-grid">
+                    <!-- JavaScriptで動的生成 -->
+                </div>
 
-            <!-- レースグリッド -->
-            <div class="race-grid" id="race-grid">
-                <!-- JavaScriptで動的生成 -->
-            </div>
+                <!-- ページネーション -->
+                <div class="pagination" id="pagination">
+                    <button class="page-btn" id="prev-page" title="前のページ">
+                        <i class="fas fa-chevron-left"></i> 前へ
+                    </button>
+                    <div class="page-numbers" id="page-numbers"></div>
+                    <button class="page-btn" id="next-page" title="次のページ">
+                        次へ <i class="fas fa-chevron-right"></i>
+                    </button>
+                </div>
+            </section>
 
-            <!-- ページネーション -->
-            <div class="pagination" id="pagination">
-                <button class="page-btn" id="prev-page" title="前のページ">
-                    <i class="fas fa-chevron-left"></i> 前へ
-                </button>
-                <div class="page-numbers" id="page-numbers"></div>
-                <button class="page-btn" id="next-page" title="次のページ">
-                    次へ <i class="fas fa-chevron-right"></i>
-                </button>
-            </div>
+            <!-- ===== タイムアタック ===== -->
+            <section id="tab-ta" class="tab-panel">
+                <div class="toolbar">
+                    <p class="section-desc" id="ta-desc">レース作成後、最初のゴールの平均タイムが目標タイムになります。目標タイム以内でゴールすると、1レースにつき1回だけ報酬がもらえます。</p>
+                    <div class="filter-group" id="ta-filter">
+                        <button class="filter-btn active" data-ta-filter="all">すべて</button>
+                        <button class="filter-btn" data-ta-filter="open">未達成</button>
+                        <button class="filter-btn" data-ta-filter="cleared">達成済み</button>
+                        <button class="filter-btn" data-ta-filter="pending">計測中</button>
+                    </div>
+                </div>
+                <div class="race-grid" id="ta-list"></div>
+            </section>
 
-            <!-- 管理者ボタン -->
-            <div id="admin-controls" class="admin-controls" style="display: none;">
-                <button id="create-race-btn" class="btn-admin">
-                    <i class="fas fa-plus"></i> 新規レース作成
-                </button>
-            </div>
+            <!-- ===== ランキング ===== -->
+            <section id="tab-ranking" class="tab-panel">
+                <div class="ranking-layout">
+                    <div class="ranking-side">
+                        <div class="profile-card" id="ranking-me"></div>
+                        <div class="side-card">
+                            <h3><i class="fas fa-circle-info"></i> ポイントのルール</h3>
+                            <ul class="rule-list" id="ranking-rules"></ul>
+                        </div>
+                    </div>
+                    <div class="ranking-table-wrap">
+                        <div class="ranking-table" id="ranking-list"></div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ===== 管理 ===== -->
+            <section id="tab-admin" class="tab-panel">
+                <div class="admin-actions">
+                    <button id="create-race-btn" class="btn-admin">
+                        <i class="fas fa-plus"></i> 新規レース作成
+                    </button>
+                    <button id="reroll-daily-btn" class="btn-admin secondary">
+                        <i class="fas fa-shuffle"></i> 今日のデイリーを選び直す
+                    </button>
+                </div>
+                <div class="admin-table" id="admin-list"></div>
+            </section>
 
             <!-- レース中キャンセルボタン（レース中に/raceで開いた時に表示） -->
             <div id="race-cancel-controls" class="race-cancel-controls" style="display: none;">
@@ -167,6 +239,14 @@
                                 <label><i class="fas fa-chart-bar"></i> 参加回数</label>
                                 <span id="detail-attempts"></span>
                             </div>
+                            <div class="info-item">
+                                <label><i class="fas fa-bullseye"></i> 目標タイム</label>
+                                <span id="detail-target"></span>
+                            </div>
+                            <div class="info-item">
+                                <label><i class="fas fa-sack-dollar"></i> TA報酬</label>
+                                <span id="detail-reward"></span>
+                            </div>
                         </div>
                         
                         <button id="set-waypoint-btn" class="btn-waypoint">
@@ -189,7 +269,7 @@
                     </div>
                     
                     <div class="leaderboard">
-                        <h3><i class="fas fa-trophy"></i> ランキング TOP 20</h3>
+                        <h3><i class="fas fa-trophy"></i> タイムランキング TOP 20</h3>
                         <div class="leaderboard-list" id="leaderboard-list">
                             <!-- JavaScriptで生成 -->
                         </div>

@@ -13,7 +13,8 @@ shared_scripts {
 
 server_scripts {
     '@oxmysql/lib/MySQL.lua',
-    'server/main.lua'
+    'server/main.lua',
+    'server/progression.lua'
 }
 
 client_scripts {
