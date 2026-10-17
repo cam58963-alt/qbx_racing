@@ -232,16 +232,20 @@ end
 -- （許容距離 = teleportThreshold + 最高速度 × 経過時間。通信の遅れで位置がまとめて進んでも誤判定しにくいように）
 -- ===================================
 -- 定期確認に加えて、チェックポイント・ゴールの報告を受け付けるたびにも呼ぶ（確認の間に移動して戻る手口を防ぐ）
--- coords: その時点の位置（省略すると今の位置）。戻り値: テレポートしていなければ true
-local function CheckRacerMovement(src, state, now, coords)
+-- coords: その時点の位置（省略すると今の位置）
+-- deferCommit: true なら確認した位置を基準として記録しない（報告が受け付けられた時だけ呼び出し側で記録する。
+--              受け付けられなかった報告を何度も送って、少しずつ基準を進められないように）
+-- 戻り値: テレポートしていなければ true, 記録する位置（deferCommit の時に呼び出し側で state.lastSample に入れる）
+local function CheckRacerMovement(src, state, now, coords, deferCommit)
     if not GetConfigValue('Security.antiCheat.enabled', true) or not GetConfigValue('Security.antiCheat.teleportDetection', true) then
         return true
     end
     coords = coords or GetServerPlayerCoords(src)
     if not coords then return not state.teleported end
     local last = state.lastSample
-    state.lastSample = {coords = coords, time = now}
-    if not last or state.teleported then return not state.teleported end
+    local sample = {coords = coords, time = now}
+    if not deferCommit then state.lastSample = sample end
+    if not last or state.teleported then return not state.teleported, sample end
     -- 読み込み中に届いた報告を後から確認する時は時刻が前後するため、間隔は絶対値で見る
     local seconds = math.abs(now - last.time) / 1000
     local allowed = GetConfigValue('Security.antiCheat.teleportThreshold', 100.0)
@@ -252,7 +256,7 @@ local function CheckRacerMovement(src, state, now, coords)
         print(('^1[CAM Racing]^7 レース中のテレポートの可能性: src=%d 移動=%.0fm / %.1f秒（許容 %.0fm）。この走行は記録しません'):format(
             src, moved, seconds, allowed))
     end
-    return not state.teleported
+    return not state.teleported, sample
 end
 
 CreateThread(function()
@@ -1579,7 +1583,8 @@ RegisterNetEvent('qbx_racing:server:updateProgress', function(sessionId, checkpo
     
     -- スタート時の車両に乗っていること・前回の確認からあり得ない移動をしていないこと
     if participant.raceVehicle and GetServerPlayerVehicle(src) ~= participant.raceVehicle then return end
-    if not CheckRacerMovement(src, participant, GetGameTimer()) then return end
+    local movementOk, sample = CheckRacerMovement(src, participant, GetGameTimer(), nil, true)
+    if not movementOk then return end
     
     -- 通過したチェックポイントの近くにいること（サーバーで見た位置で確認）
     if not IsPlayerNearCheckpoint(src, CourseCheckpointAt(session.race.checkpoints or {}, passedIndex), nil, session.race.vehicle_type) then
@@ -1587,6 +1592,7 @@ RegisterNetEvent('qbx_racing:server:updateProgress', function(sessionId, checkpo
             participant.driverName, sessionId, passedIndex))
         return
     end
+    if sample then participant.lastSample = sample end
     participant.currentCheckpoint = checkpoint
     participant.currentLap = lap
 end)
@@ -1604,7 +1610,7 @@ RegisterNetEvent('qbx_racing:server:finishMultiRace', function(sessionId, timeMs
     if not finisher or finisher.status ~= 'racing' then return end
     
     -- 最終周のゴール直前まで順番に通過したか（サーバーが受け取った進捗で確認。ゴールの通過はこの報告自体）
-    if not CheckRacerMovement(src, finisher, GetGameTimer()) or finisher.currentLap ~= session.totalLaps or finisher.currentCheckpoint ~= session.lapEndIndex
+    if not CheckRacerMovement(src, finisher, GetGameTimer(), nil, true) or finisher.currentLap ~= session.totalLaps or finisher.currentCheckpoint ~= session.lapEndIndex
         or (finisher.raceVehicle and GetServerPlayerVehicle(src) ~= finisher.raceVehicle)
         or not IsPlayerNearCheckpoint(src, CourseCheckpointAt(session.race.checkpoints or {}, session.lapEndIndex), nil, session.race.vehicle_type) then
         print(('^3[CAM Racing]^7 ゴールを受け付けませんでした（チェックポイント未通過）: %s session=%d'):format(
@@ -2094,12 +2100,14 @@ function ApplySoloProgress(src, run, checkpoint, lap, coords, vehicle, receivedA
             src, run.raceId))
         return
     end
-    if not CheckRacerMovement(src, run, receivedAt or GetGameTimer(), coords or nil) then return end
+    local movementOk, sample = CheckRacerMovement(src, run, receivedAt or GetGameTimer(), coords or nil, true)
+    if not movementOk then return end
     if not IsPlayerNearCheckpoint(src, SoloCheckpointAt(run, passedIndex), coords, run.vehicleType) then
         print(('^3[CAM Racing]^7 チェックポイント通過を受け付けませんでした（位置が離れています）: src=%d race=%d CP=%d'):format(
             src, run.raceId, passedIndex))
         return
     end
+    if sample then run.lastSample = sample end
     run.checkpoint, run.lap = checkpoint, lap
 end
 
@@ -2128,7 +2136,7 @@ RegisterNetEvent('qbx_racing:server:finishRace', function(raceId, timeMs, vehicl
     if soloRuns[src] == run then soloRuns[src] = nil end
     
     -- 最終周のゴール直前まで順番に通過していて、スタート時の車両でゴール地点にいること（サーバーが確認した進捗で判断）
-    if run.pending or not CheckRacerMovement(src, run, GetGameTimer()) or not run.lapEndIndex or run.lap ~= run.totalLaps or run.checkpoint ~= run.lapEndIndex
+    if run.pending or not CheckRacerMovement(src, run, GetGameTimer(), nil, true) or not run.lapEndIndex or run.lap ~= run.totalLaps or run.checkpoint ~= run.lapEndIndex
         or not IsInSoloRunVehicle(src, run)
         or not IsPlayerNearCheckpoint(src, SoloCheckpointAt(run, run.lapEndIndex), nil, run.vehicleType) then
         print(('^3[CAM Racing]^7 ソロのゴールを受け付けませんでした（チェックポイント未通過）: src=%d race=%d'):format(src, raceId))
