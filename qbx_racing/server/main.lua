@@ -1604,12 +1604,9 @@ RegisterNetEvent('qbx_racing:server:finishMultiRace', function(sessionId, timeMs
             values = {position == 1 and 1 or 0, finisher.citizenid}
         }
     end
+    -- 保存中のゴールがある間はレースを終了しない（終了の精算で、保存に失敗した記録を一緒に保存し直すため）
+    session.savingFinishes = (session.savingFinishes or 0) + 1
     local finishSaved = MySQL.transaction.await(finishQueries)
-    if finishSaved and Progression then
-        -- タイムアタックの目標タイム（最初の数回のゴールの平均）の計算
-        local ok, err = pcall(Progression.UpdateTargetTime, session.raceId)
-        if not ok then print('^1[CAM Racing]^7 目標タイムの計算に失敗しました: ' .. tostring(err)) end
-    end
     if not finishSaved then
         -- 保存できなかった記録は、レース終了時の精算（賞金の記録と同じトランザクション）でもう一度保存する
         -- （そこでも保存できなければ賞金も確定しない）
@@ -1619,6 +1616,13 @@ RegisterNetEvent('qbx_racing:server:finishMultiRace', function(sessionId, timeMs
         for _, query in ipairs(finishQueries) do
             table.insert(session.pendingFinishQueries, query)
         end
+    end
+    session.savingFinishes = session.savingFinishes - 1
+    
+    if finishSaved and Progression then
+        -- タイムアタックの目標タイム（最初の数回のゴールの平均）の計算
+        local ok, err = pcall(Progression.UpdateTargetTime, session.raceId)
+        if not ok then print('^1[CAM Racing]^7 目標タイムの計算に失敗しました: ' .. tostring(err)) end
     end
     
     -- 完了通知（賞金はレース終了時にまとめて支払う）
@@ -1659,6 +1663,9 @@ end)
 function CheckSessionComplete(sessionId)
     local session = ActiveSessions[sessionId]
     if not session or session.status ~= 'racing' then return end
+    
+    -- ゴールの記録を保存中なら、保存が終わった時の確認（finishMultiRace の最後）に任せる
+    if (session.savingFinishes or 0) > 0 then return end
     
     for _, participant in ipairs(session.participants) do
         if participant.status == 'racing' then
