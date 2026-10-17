@@ -1966,9 +1966,9 @@ RegisterNetEvent('qbx_racing:server:soloRaceStarted', function(raceId, mode)
     -- デイリーかどうかもゴールを受け付ける前に決めておく
     if mode == 'daily' and Progression then
         local Player = GetPlayer(src)
-        local ok, playable = pcall(Progression.IsDailyPlayable, Player and Player.PlayerData.citizenid, raceId)
+        local ok, playable, daily, day = pcall(Progression.IsDailyPlayable, Player and Player.PlayerData.citizenid, raceId)
         if ok and playable then
-            run.daily = true
+            run.daily = {day = day, race = daily}
         else
             TriggerClientEvent('ox_lib:notify', src, {
                 title = 'デイリーレース',

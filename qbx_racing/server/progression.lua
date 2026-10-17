@@ -354,12 +354,15 @@ local function DailyHasRemaining(daily, claimed)
 end
 
 -- デイリーとして出走できるか（今日のデイリーで、受け取っていない報酬が残っている）
+-- 戻り値: 出走できるか, その日のデイリー（目標タイム・報酬）, 日付
+-- （ゴールが日付をまたいでも、出走時のデイリーで報酬を判定するため一緒に返す）
 function Progression.IsDailyPlayable(citizenid, raceId)
     raceId = ToInteger(raceId)
     if not citizenid or not raceId or not DailyEnabled() then return false end
     local daily, day = FindDailyRace(raceId)
     if not daily then return false end
-    return DailyHasRemaining(daily, DailyClaims(day, citizenid, raceId))
+    if not DailyHasRemaining(daily, DailyClaims(day, citizenid, raceId)) then return false end
+    return true, daily, day
 end
 
 -- ===================================
@@ -390,7 +393,8 @@ end
 
 -- race: id, name, target_time_ms, ta_reward（今回の記録を保存する前の値）
 -- 戻り値: ゴール通知に追加する行
-function Progression.OnSoloRaceFinished(src, citizenid, race, timeMs, isDaily)
+-- dailyRun: デイリーとして出走した時の {day = 日付, race = その日のデイリー}（通常の走行は nil / false）
+function Progression.OnSoloRaceFinished(src, citizenid, race, timeMs, dailyRun)
     local lines = {}
     local paid = false
     local target = ToInteger(race.target_time_ms)
@@ -413,9 +417,10 @@ function Progression.OnSoloRaceFinished(src, citizenid, race, timeMs, isDaily)
     end
 
     -- デイリーレース（完走分・目標タイム分をそれぞれ1日1回）
+    -- デイリーは出走した日の内容で判定する（日付をまたいでゴールしても、前日の報酬として受け取る）
     local daily, day
-    if isDaily and DailyEnabled() then
-        daily, day = FindDailyRace(race.id)
+    if type(dailyRun) == 'table' and DailyEnabled() then
+        daily, day = dailyRun.race, dailyRun.day
         if not daily then
             lines[#lines + 1] = '📅 今日のデイリーレースではなくなったため、デイリー報酬はありません'
         else
