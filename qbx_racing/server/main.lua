@@ -200,22 +200,21 @@ local function CalculateMinRaceTimeMs(race)
     return math.floor(total / maxSpeed * 1000)
 end
 
--- サーバーで見たプレイヤーの位置（OneSync が無いなどで取れない場合は false）
+-- サーバーで見たプレイヤーの位置（OneSync が無いなどで取れない場合は false。その場合は通過を認めない）
 local function GetServerPlayerCoords(src)
     local ped = GetPlayerPed(src)
     if not ped or ped == 0 then return false end
-    local coords = GetEntityCoords(ped)
-    if coords.x == 0.0 and coords.y == 0.0 and coords.z == 0.0 then return false end
-    return coords
+    return GetEntityCoords(ped)
 end
 
--- サーバーで見たプレイヤーの位置がチェックポイントの近くか（位置が取れない場合は確認しない）
+-- サーバーで見たプレイヤーの位置がチェックポイントの近くか
 -- coords: 報告が届いた時点の位置（省略すると今の位置）
 -- vehicleType: レースの車両タイプ（許容距離は車両タイプごと。速い乗り物ほどサーバーの位置とのずれが大きい）
 local function IsPlayerNearCheckpoint(src, cp, coords, vehicleType)
     if not cp then return false end
     if coords == nil then coords = GetServerPlayerCoords(src) end
-    if not coords then return true end
+    -- 位置が取れない場合は通過を認めない（報酬の対象になる走行なので、確認できないものは受け付けない）
+    if not coords then return false end
     local margin = GetConfigValue('VehicleTypes.' .. tostring(vehicleType) .. '.progressDistanceMargin',
         GetConfigValue('Security.antiCheat.progressDistanceMargin', 100.0))
     local allowed = (tonumber(cp.radius) or 10.0) + (tonumber(margin) or 100.0)

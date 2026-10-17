@@ -281,6 +281,21 @@ local function ReplaceInactiveDailySlots(day)
     end
 end
 
+-- 選んだ時に候補が足りず最低数に届かなかった日は、後から候補が増えた時に足りない枠を追加する
+local function TopUpDailySlots(day, slotCount)
+    local minCount = math.max(1, ToInteger(GetConfigValue('Daily.raceCount.min', 1)) or 1)
+    if slotCount >= minCount then return end
+    local selected, maxSlot = {}, 0
+    for _, row in ipairs(MySQL.query.await('SELECT slot, race_id FROM qbx_daily_races WHERE day = ?', {day}) or {}) do
+        selected[row.race_id] = true
+        maxSlot = math.max(maxSlot, ToInteger(row.slot) or 0)
+    end
+    local candidates = DailyCandidates(selected)
+    for slot = maxSlot + 1, maxSlot + (minCount - slotCount) do
+        FillDailySlot(day, slot, candidates)
+    end
+end
+
 -- 今日のデイリーレース（まだ選ばれていなければここで選ぶ。削除されたレースの枠は選び直す）
 local dailyPicking = false
 function Progression.GetDailyRaces()
@@ -292,8 +307,11 @@ function Progression.GetDailyRaces()
     dailyPicking = true
     local ok, err = pcall(function()
         ReplaceInactiveDailySlots(day)
-        if #LoadDailyRows(day) == 0 then
+        local slotCount = tonumber(MySQL.scalar.await('SELECT COUNT(*) FROM qbx_daily_races WHERE day = ?', {day})) or 0
+        if slotCount == 0 then
             PickDailyRaces(day)
+        else
+            TopUpDailySlots(day, slotCount)
         end
     end)
     dailyPicking = false
