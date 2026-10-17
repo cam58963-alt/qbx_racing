@@ -93,13 +93,18 @@ local function CalculateTimeAttackReward(lengthM, gates, targetMs, vehicleType)
 end
 
 -- ランキングのポイントを増減する（0 未満にはならない）
+-- ランキング履歴の ref（1回の変動を識別する値）。citizenid の長さに関係なく32文字以内に収める
+local function NewRankingRef()
+    return ('%x%08x%08x'):format(GetGameTimer(), math.random(0, 0x7fffffff), math.random(0, 0x7fffffff))
+end
+
 -- 戻り値: 実際に変わったポイント（持ち点が足りず減らせなかった分は含まない。変化なし・失敗は 0）
 local function AddRankingPoints(citizenid, delta, reason, raceId)
     delta = ToInteger(delta)
     if not citizenid or not delta or delta == 0 then return 0 end
     -- 持ち点はトランザクションの中でロックして読み、減らせる分だけ減らす（同時に別の処理で減っても正しく記録する）
     -- 実際に変わった量は ref で履歴から読み直す
-    local ref = ('%s:%d:%d'):format(citizenid, GetGameTimer(), math.random(1, 1000000000))
+    local ref = NewRankingRef()
     local ok = MySQL.transaction.await({
         {query = 'SET @qbx_rp_applied = 0', values = {}},
         {
@@ -562,7 +567,7 @@ function Progression.BuildMultiplayerRanking(session)
         end
     end
     for i, entrant in ipairs(entrants) do
-        local ref = ('multi:%s:%s:%d'):format(tostring(session.id), entrant.participant.citizenid, math.random(1, 1000000000))
+        local ref = NewRankingRef()
         add(([[INSERT INTO qbx_ranking_log (citizenid, delta, reason, race_id, ref)
                SELECT ?, @qbx_rk_%d, 'multi', ?, ? FROM DUAL WHERE @qbx_rk_%d <> 0]]):format(i, i),
             {entrant.participant.citizenid, session.raceId, ref})
