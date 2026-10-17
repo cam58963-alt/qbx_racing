@@ -963,6 +963,8 @@ function RegisterSessionParticipant(sessionId, source, options)
     options = options or {}
     local Player = GetPlayer(source)
     if not Player then return false, 'プレイヤーデータが見つかりません' end
+    -- ソロで走行中は参加できない（1回の走行をソロとマルチの両方で記録させないため）
+    if soloRuns[source] then return false, 'ソロレースの走行中は参加できません' end
     local citizenid = Player.PlayerData.citizenid
     
     local profile = GetDriverProfile(citizenid)
@@ -1923,6 +1925,16 @@ RegisterNetEvent('qbx_racing:server:soloRaceStarted', function(raceId, mode)
     local vehicle = GetServerPlayerVehicle(src)
     raceId = ToInteger(raceId)
     if not raceId then return end
+    
+    -- マルチのセッションに参加中はソロを始められない（1回の走行をソロとマルチの両方で記録させないため）
+    if FindPlayerActiveSession(src) then
+        TriggerClientEvent('ox_lib:notify', src, {
+            title = '記録なし',
+            description = 'マルチのセッションに参加中のため、ソロのタイムは記録されません',
+            type = 'error'
+        })
+        return
+    end
     
     -- 走行中のソロを終わらせずに次を始めた場合は、前の走行をリタイア扱いにする
     -- （通常の画面からは走行中に次のレースを始められないため、リタイアのペナルティを避ける操作になる）
