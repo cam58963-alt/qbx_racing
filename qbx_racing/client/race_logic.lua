@@ -709,21 +709,21 @@ function StartRace(race)
         
         -- 案内UI表示
         lib.showTextUI(string.format(
-            '🏁 **レース準備中**: %s  \n  \n'
-            .. '📍 スタート地点まで: **%.0fm**  \n'
-            .. '🚗 車両タイプ: **%s**  \n'
-            .. '🏎️ タイプ: **%s**（%d周）  \n'
-            .. '📍 CP: **%d個**  \n  \n'
-            .. '➡️ スタート地点に向かってください！  \n'
-            .. '到着後すぐにカウントダウンが始まります',
+            '**レース準備中**: %s  \n'
+            .. 'スタートまで **%.0fm**  \n'
+            .. '%s・%s（%d周）・CP %d個  \n'
+            .. '到着するとカウントダウン開始',
             race.name, distToStart, vehicleLabel, raceTypeLabel, totalLaps, #raceCheckpoints), {
             position = "left-center",
             icon = 'map-marked-alt',
             style = {
-                borderRadius = 8,
-                backgroundColor = 'rgba(26, 26, 46, 0.95)',
+                borderRadius = 6,
+                backgroundColor = 'rgba(26, 26, 46, 0.8)',
                 color = '#ffffff',
-                borderLeft = '4px solid #fbbf24'
+                borderLeft = '3px solid #fbbf24',
+                fontSize = '12px',
+                lineHeight = '1.5',
+                padding = '8px 12px'
             }
         })
     end
@@ -756,21 +756,21 @@ function StartRace(race)
                 local totalLaps = currentRace.race_type == 'sprint' and 1 or (currentRace.laps or 1)
                 
                 lib.showTextUI(string.format(
-                    '🏁 **レース準備中**: %s  \n  \n'
-                    .. '📍 スタート地点まで: **%.0fm**  \n'
-                    .. '🚗 車両タイプ: **%s**  \n'
-                    .. '🏎️ タイプ: **%s**（%d周）  \n'
-                    .. '📍 CP: **%d個**  \n  \n'
-                    .. '➡️ スタート地点に向かってください！  \n'
-                    .. '到着後すぐにカウントダウンが始まります',
+                    '**レース準備中**: %s  \n'
+                    .. 'スタートまで **%.0fm**  \n'
+                    .. '%s・%s（%d周）・CP %d個  \n'
+                    .. '到着するとカウントダウン開始',
                     currentRace.name, dist, vehicleLabel, raceTypeLabel, totalLaps, #raceCheckpoints), {
                     position = "left-center",
                     icon = 'map-marked-alt',
                     style = {
-                        borderRadius = 8,
-                        backgroundColor = 'rgba(26, 26, 46, 0.95)',
+                        borderRadius = 6,
+                        backgroundColor = 'rgba(26, 26, 46, 0.8)',
                         color = '#ffffff',
-                        borderLeft = '4px solid #fbbf24'
+                        borderLeft = '3px solid #fbbf24',
+                        fontSize = '12px',
+                        lineHeight = '1.5',
+                        padding = '8px 12px'
                     }
                 })
                 

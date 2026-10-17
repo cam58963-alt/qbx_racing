@@ -1119,24 +1119,24 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
     
     -- 操作ガイドを左側に表示
     local function ShowCreationGuide()
+        -- 空行を入れると ox_lib が段落を横並びにして幅が広がるため、1段落にまとめる
         lib.showTextUI(
-            '🏁 **レース作成モード**: ' .. raceCreationData.name .. '  \n  \n'
-            .. '[E] チェックポイント設置  \n'
-            .. '[R] 作成完了（最低 ' .. minCheckpoints .. '個）  \n'
-            .. '[ESC] 作成キャンセル  \n'
-            .. '[Backspace] 最後のポイント削除  \n  \n'
-            .. '[←] [→] 今いる場所に曲がり角ガイド設置（左・右）  \n'
-            .. '[↑] [↓] 最後のガイドを横に長く・短く  \n'
-            .. '[Delete] 最後のガイド削除  \n  \n'
-            .. '設置済み: **' .. #checkpoints .. '個** / ガイド: **' .. #turnGuides .. '個**',
+            '**作成中**: ' .. raceCreationData.name
+            .. '　CP **' .. #checkpoints .. '** / ガイド **' .. #turnGuides .. '**  \n'
+            .. '[E] CP設置　[Backspace] CP削除  \n'
+            .. '[←][→] ガイド設置　[↑][↓] 長さ　[Del] 削除  \n'
+            .. '[R] 完了（' .. minCheckpoints .. '個以上）　[ESC] 中止',
         {
             position = "left-center",
             icon = 'map-marked-alt',
             style = {
-                borderRadius = 8,
-                backgroundColor = 'rgba(26, 26, 46, 0.95)',
+                borderRadius = 6,
+                backgroundColor = 'rgba(26, 26, 46, 0.8)',
                 color = '#ffffff',
-                borderLeft = '4px solid #ef4444'
+                borderLeft = '3px solid #ef4444',
+                fontSize = '12px',
+                lineHeight = '1.5',
+                padding = '8px 12px'
             }
         })
     end
