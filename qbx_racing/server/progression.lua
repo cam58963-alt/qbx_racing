@@ -499,11 +499,9 @@ function Progression.BuildMultiplayerRanking(session)
         elseif participant.status == 'retired' then
             order = math.huge
         end
-        if order then
-            -- プロフィールのある参加者だけ
-            if MySQL.scalar.await('SELECT 1 FROM qbx_driver_profiles WHERE citizenid = ?', {participant.citizenid}) then
-                entrants[#entrants + 1] = {participant = participant, order = order}
-            end
+        -- （参加にはプロフィールが必要。ここでは DB を読まず、無い場合は下の SQL がやり取りを 0 にする）
+        if order and participant.citizenid then
+            entrants[#entrants + 1] = {participant = participant, order = order}
         end
     end
     if #entrants < 2 then return {}, {} end
@@ -527,7 +525,10 @@ function Progression.BuildMultiplayerRanking(session)
                 add('SET @qbx_rk_balance = 0')
                 add('SELECT points INTO @qbx_rk_balance FROM qbx_driver_profiles WHERE citizenid = ? FOR UPDATE',
                     {loser.participant.citizenid})
-                add('SET @qbx_rk_amount = LEAST(?, GREATEST(@qbx_rk_balance, 0))', {perOpponent})
+                -- 受け取る側のプロフィールが無ければ 0（渡す側だけ減らさない）
+                add('SET @qbx_rk_amount = 0')
+                add('SELECT LEAST(?, GREATEST(@qbx_rk_balance, 0)) INTO @qbx_rk_amount FROM qbx_driver_profiles WHERE citizenid = ? FOR UPDATE',
+                    {perOpponent, winner.participant.citizenid})
                 add('UPDATE qbx_driver_profiles SET points = points - @qbx_rk_amount WHERE citizenid = ?',
                     {loser.participant.citizenid})
                 add('UPDATE qbx_driver_profiles SET points = points + @qbx_rk_amount WHERE citizenid = ?',
