@@ -1595,6 +1595,8 @@ local function DrawCustomRaceMarkers(turns, isCircuit, vehicleType)
     end
     
     -- 先のチェックポイントの予告（周回レースは次の周までつなげて表示）
+    -- 曲がり角ガイドも、予告しているチェックポイントの分を同じ薄さで表示する
+    local showGuidesAhead = RaceMarkers.ShowTurnGuidesAhead()
     local lap, index = currentLap, currentCheckpoint
     for ahead = 1, RaceMarkers.GetPreviewCount() do
         if IsFinishPosition(lap, index) then break end
@@ -1609,6 +1611,11 @@ local function DrawCustomRaceMarkers(turns, isCircuit, vehicleType)
             RaceMarkers.Draw('finish', previewCp, alpha * 0.5, vehicleType)
         else
             RaceMarkers.Draw('preview', previewCp, alpha, vehicleType)
+            
+            local aheadTurns = showGuidesAhead and turns[index > total and 1 or index]
+            for _, turn in ipairs(aheadTurns or {}) do
+                RaceMarkers.DrawTurnGuide(turn, vehicleType, alpha)
+            end
         end
     end
 end
@@ -1724,6 +1731,7 @@ function StartStartPreview(race)
                     RaceMarkers.DrawTurnGuide(turn, vehicleType)
                 end
                 
+                local showGuidesAhead = RaceMarkers.ShowTurnGuidesAhead()
                 for ahead = 1, previewCount do
                     local cp, isFinish = PointAt(ahead)
                     if not cp then break end
@@ -1733,6 +1741,13 @@ function StartStartPreview(race)
                         break
                     end
                     RaceMarkers.Draw('preview', cp, alpha, vehicleType)
+                    
+                    -- 予告しているチェックポイントの曲がり角ガイド（周回でスタート地点に戻る区間は CP1 のガイド）
+                    local index = 2 + ahead
+                    local aheadTurns = showGuidesAhead and turns[index > #checkpoints and 1 or index]
+                    for _, turn in ipairs(aheadTurns or {}) do
+                        RaceMarkers.DrawTurnGuide(turn, vehicleType, alpha)
+                    end
                 end
             end
             
