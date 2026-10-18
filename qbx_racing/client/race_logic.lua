@@ -548,6 +548,10 @@ function StartGhostModeOptimized()
                     if vehicle ~= playerVehicle and DoesEntityExist(vehicle)
                         and ShouldGhostVehicle(vehicle, ghostMode, isRacer) then
                         ProcessVehicleGhosting(playerVehicle, vehicle, distance, isRacer)
+                    elseif ghostedEntities[vehicle] then
+                        -- 対象外になった車両（運転手が降りたなど）はすぐ透明度を戻す
+                        if DoesEntityExist(vehicle) then ResetEntityAlpha(vehicle) end
+                        ghostedEntities[vehicle] = nil
                     end
                 end
             end
