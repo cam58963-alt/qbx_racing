@@ -592,6 +592,7 @@ RegisterNetEvent('qbx_racing:server:createRace', function(data)
     if raceType ~= 'circuit' and raceType ~= 'sprint' then raceType = nil end
     local maxLaps = GetConfigValue('RaceTypes.circuit.maxLaps', 10)
     local laps = raceType == 'sprint' and 1 or math.max(1, math.min(maxLaps, ToInteger(data.laps) or 1))
+    local ghostMode = data.ghostMode == 'players' and 'players' or 'full'
     
     local checkpoints = {}
     local checkpointsValid = type(data.checkpoints) == 'table'
@@ -634,14 +635,15 @@ RegisterNetEvent('qbx_racing:server:createRace', function(data)
     -- レース作成
     local raceId = MySQL.insert.await([[
         INSERT INTO qbx_races 
-        (name, description, vehicle_type, race_type, laps, creator_driver_name) 
-        VALUES (?, ?, ?, ?, ?, ?)
+        (name, description, vehicle_type, race_type, laps, ghost_mode, creator_driver_name) 
+        VALUES (?, ?, ?, ?, ?, ?, ?)
     ]], {
         name,
         description,
         vehicleType,
         raceType,
         laps,
+        ghostMode,
         profile.driver_name
     })
     
@@ -1331,29 +1333,36 @@ RegisterNetEvent('qbx_racing:server:startCountdown', function(sessionId)
     MySQL.update('UPDATE qbx_race_sessions SET status = ? WHERE id = ?', {'countdown', sessionId})
     
     -- カウントダウンスレッド
+    -- 準備（車両ロックなし・コースのマーカーを見て向きを確認）→ ロック（車両を止めてカウント）→ スタート
     CreateThread(function()
-        local countdown = session.countdownDuration
+        local prepSeconds = session.countdownDuration
+        local lockSeconds = math.max(1, ToInteger(GetConfigValue('Race.lockSeconds', 3)) or 3)
+        local remaining = prepSeconds + lockSeconds
         
-        -- 全参加者にカウントダウン開始通知
+        -- 全参加者にカウントダウン開始通知（向きの確認用にコースも送る）
         for _, participantSource in ipairs(validParticipants) do
             TriggerClientEvent('qbx_racing:client:countdownStarted', participantSource, {
                 sessionId = sessionId,
-                duration = countdown,
-                startPoint = session.startPoint
+                duration = prepSeconds,
+                lockSeconds = lockSeconds,
+                startPoint = session.startPoint,
+                race = session.race
             })
         end
         
         -- カウントダウンループ
-        while countdown > 0 and ActiveSessions[sessionId] == session and session.status == 'countdown' do
+        while remaining > 0 and ActiveSessions[sessionId] == session and session.status == 'countdown' do
+            local phase = remaining > lockSeconds and 'prep' or 'lock'
             for _, participantSource in ipairs(validParticipants) do
                 TriggerClientEvent('qbx_racing:client:countdownTick', participantSource, {
                     sessionId = sessionId,
-                    countdown = countdown
+                    phase = phase,
+                    countdown = phase == 'prep' and remaining - lockSeconds or remaining
                 })
             end
             
             Wait(1000)
-            countdown = countdown - 1
+            remaining = remaining - 1
         end
         
         -- レース開始
@@ -2470,6 +2479,7 @@ local SCHEMA_TABLES = {
             `ta_rate` INT NULL,
             `ta_calib_after_id` INT DEFAULT 0,
             `course_length_m` FLOAT NULL,
+            `ghost_mode` ENUM('players', 'full') DEFAULT 'full',
             `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             INDEX `idx_vehicle_type` (`vehicle_type`),
             INDEX `idx_race_type` (`race_type`),
@@ -2660,6 +2670,8 @@ local SCHEMA_COLUMNS = {
     {'qbx_races', 'ta_rate', "INT NULL"},
     {'qbx_races', 'ta_calib_after_id', "INT DEFAULT 0"},
     {'qbx_races', 'course_length_m', "FLOAT NULL"},
+    -- ゴーストモード（players = プレイヤーの車だけすり抜け / full = NPCの車もすり抜け）
+    {'qbx_races', 'ghost_mode', "ENUM('players', 'full') DEFAULT 'full'"},
     -- ランキングのポイント（既存のプロフィールは設定の初期ポイントで埋める）
     {'qbx_driver_profiles', 'points', "INT DEFAULT 1000 AFTER `total_wins`", function()
         MySQL.update.await('UPDATE qbx_driver_profiles SET points = ?',

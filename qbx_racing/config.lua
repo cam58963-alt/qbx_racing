@@ -174,6 +174,13 @@ Config.Checkpoint = {
     maxCheckpoints = 500,       -- 最大チェックポイント数
     maxTurnGuides = 50,         -- 手動設置できる曲がり角ガイドの最大数
     
+    -- コース作成中の表示（一度に描けるマーカーの数には上限があるため、近くのものだけ表示する）
+    creationDraw = {
+        distance = 300.0,       -- この距離（m）以内のチェックポイント・ガイドを表示
+        maxCheckpoints = 30,    -- 一度に表示するチェックポイントの数（近い順。最後に置いたものは常に表示）
+        maxTurnGuides = 10      -- 一度に表示する曲がり角ガイドの数（近い順）
+    },
+    
     -- 作成モード設定
     creationMode = {
         previewColor = {r = 255, g = 255, b = 0, a = 100},  -- 設置予定位置の色（黄色）
@@ -384,8 +391,11 @@ Config.Checkpoint = {
 -- レース基本設定
 -- ===================================
 Config.Race = {
-    -- カウントダウン
-    countdownSeconds = 3,        -- ソロレースのカウントダウン時間（スタート地点到着後）
+    -- スタートのカウントダウン（スタート地点到着後）
+    -- 1. 準備: 車両はロックせず、コースのマーカーを表示して向きを確認してもらう
+    -- 2. ロック: 車両を止めてカウントし、終わったらスタート
+    prepSeconds = 10,            -- 準備カウント（秒、ソロ用。マルチはセッション作成時に決める）
+    lockSeconds = 3,             -- ロックしてからスタートまでのカウント（秒、ソロ・マルチ共通）
     
     -- レース中の車両乗り換えチェック（スタート時の車両以外で走るとリタイア）
     vehicleSwapCheck = {
@@ -546,9 +556,9 @@ Config.Multiplayer = {
     -- セッション設定
     minParticipants = 2,         -- 最低参加人数
     maxParticipants = 16,        -- 最大参加人数
-    defaultCountdown = 10,       -- デフォルトカウントダウン時間（秒）
-    minCountdown = 5,            -- 最短カウントダウン時間
-    maxCountdown = 30,           -- 最長カウントダウン時間
+    defaultCountdown = 10,       -- 準備カウントのデフォルト（秒、車両ロックなし。この後 Race.lockSeconds のロックカウント）
+    minCountdown = 5,            -- 準備カウントの最短
+    maxCountdown = 30,           -- 準備カウントの最長
     
     -- セッション管理
     sessionTimeout = 600,        -- セッションタイムアウト（秒）
@@ -601,8 +611,9 @@ Config.Multiplayer = {
     countdownRestrictions = {
         freezeVehicle = true,          -- 車両を完全ロック
         disableControls = true,        -- 操作を無効化
-        maxDistanceFromStart = 3.0,    -- カウントダウン開始位置から動ける最大距離（メートル）
+        maxDistanceFromStart = 3.0,    -- ロック開始位置から動ける最大距離（メートル）
         startAreaRadius = 30.0,        -- スタート地点からこの半径内にいる人だけがレースに出られる（メートル）
+                                       -- 準備カウント中にこの範囲から出た人は、ロック開始時にカウントダウン開始時の位置へ戻す
         teleportBackToStart = true,    -- 範囲外に出たら戻す
         showWarnings = true            -- 警告表示
     }

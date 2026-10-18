@@ -321,6 +321,10 @@ function displayRaces() {
                     <span class="stat-value">${race.laps || 1}</span>
                 </div>
                 <div class="stat-row">
+                    <span><i class="fas fa-ghost"></i> ゴースト</span>
+                    <span class="stat-value">${ghostModeLabel(race.ghost_mode)}</span>
+                </div>
+                <div class="stat-row">
                     <span><i class="fas fa-user"></i> 作成者</span>
                     <span class="stat-value">${escapeHtml(race.creator_driver_name || '不明')}</span>
                 </div>
@@ -382,6 +386,11 @@ function goToPage(page) {
     grid.scrollTop = 0;
 }
 
+// ゴーストモードの表示名（players = プレイヤーの車だけすり抜け / full = NPCの車も）
+function ghostModeLabel(mode) {
+    return mode === 'players' ? 'プレイヤーのみ' : 'フル（NPCも）';
+}
+
 // ===================================
 // レース詳細表示
 // ===================================
@@ -397,6 +406,7 @@ function showRaceDetail(raceId) {
     document.getElementById('detail-vehicle-type').innerHTML = `<i class="${vConfig.icon}"></i> ${vConfig.label}`;
     document.getElementById('detail-race-type').innerHTML = `<i class="${rConfig.icon}"></i> ${rConfig.label}`;
     document.getElementById('detail-laps').textContent = race.laps || 1;
+    document.getElementById('detail-ghost').textContent = ghostModeLabel(race.ghost_mode);
     document.getElementById('detail-creator').textContent = race.creator_driver_name || '不明';
     document.getElementById('detail-attempts').textContent = race.total_attempts || 0;
     document.getElementById('detail-target').textContent = race.target_time_ms ? formatTime(race.target_time_ms) : '計測中';

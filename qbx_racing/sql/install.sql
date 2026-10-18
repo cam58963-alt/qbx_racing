@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS `qbx_races` (
     `ta_rate` INT NULL,                 -- 報酬レート
     `ta_calib_after_id` INT DEFAULT 0,  -- 目標タイムの計算に使う記録の起点（リセット時に更新）
     `course_length_m` FLOAT NULL,       -- コースの長さ（m）
+    `ghost_mode` ENUM('players', 'full') DEFAULT 'full', -- players: プレイヤーの車だけすり抜け / full: NPCの車もすり抜け
     `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX `idx_vehicle_type` (`vehicle_type`),
     INDEX `idx_race_type` (`race_type`),
@@ -272,6 +273,7 @@ CALL qbx_racing_safe_add_column('qbx_races', 'ta_reward', 'INT NULL');
 CALL qbx_racing_safe_add_column('qbx_races', 'ta_rate', 'INT NULL');
 CALL qbx_racing_safe_add_column('qbx_races', 'ta_calib_after_id', 'INT DEFAULT 0');
 CALL qbx_racing_safe_add_column('qbx_races', 'course_length_m', 'FLOAT NULL');
+CALL qbx_racing_safe_add_column('qbx_races', 'ghost_mode', "ENUM('players', 'full') DEFAULT 'full'");
 -- qbx_driver_profiles.points はリソース起動時に追加される（既存のプロフィールを Config.Ranking.startPoints で埋めるため、ここでは追加しない）
 
 -- プロシージャ削除（後片付け）
