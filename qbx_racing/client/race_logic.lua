@@ -334,6 +334,17 @@ local function ShouldGhostVehicle(vehicle, ghostMode, isRacer)
     return ghostMode == 'full' or isRacer or IsPlayerDrivenVehicle(vehicle)
 end
 
+-- 今回ゴースト化しなかった車両（運転手が降りた・範囲外に出たなど）の透明度を戻す
+-- applied: これまでに透明度を変えた車両、seen: 今回ゴースト化した車両
+local function ResetUnghostedAlpha(applied, seen)
+    for vehicle in pairs(applied) do
+        if not seen[vehicle] then
+            if DoesEntityExist(vehicle) then ResetEntityAlpha(vehicle) end
+            applied[vehicle] = nil
+        end
+    end
+end
+
 -- 視覚効果適用
 function ApplyGhostVisualEffect(vehicle, isRacer)
     local config = GetConfigValue('Multiplayer.ghostMode.visual', {
@@ -366,6 +377,7 @@ function StartGhostMode()
         local updateInterval = GetConfigValue('Multiplayer.ghostMode.updateInterval', 0)
         local collisionRadius = GetConfigValue('Multiplayer.ghostMode.collisionRadius', 150.0)
         local ghostMode = GetRaceGhostMode()
+        local alphaApplied = {}
         
         while isRacing and isMultiplayerRace and isGhostModeActive do
             local playerPed = PlayerPedId()
@@ -373,6 +385,7 @@ function StartGhostMode()
             
             if playerVehicle ~= 0 then
                 local playerCoords = GetEntityCoords(playerVehicle)
+                local seen = {}
                 
                 -- 全車両を取得（NPC車両含む）
                 local vehicles = GetGamePool('CVehicle')
@@ -395,9 +408,13 @@ function StartGhostMode()
                             
                             -- 視覚効果
                             ApplyGhostVisualEffect(otherVehicle, isRacerVehicle)
+                            seen[otherVehicle] = true
+                            alphaApplied[otherVehicle] = true
                         end
                     end
                 end
+                
+                ResetUnghostedAlpha(alphaApplied, seen)
             end
             
             Wait(updateInterval)
@@ -609,6 +626,7 @@ function StartSoloGhostMode()
     CreateThread(function()
         local collisionRadius = GetConfigValue('Multiplayer.ghostMode.collisionRadius', 150.0)
         local ghostMode = GetRaceGhostMode()
+        local alphaApplied = {}
         
         while isRacing and not isMultiplayerRace and isGhostModeActive do
             local playerPed = PlayerPedId()
@@ -616,6 +634,7 @@ function StartSoloGhostMode()
             
             if playerVehicle ~= 0 then
                 local playerCoords = GetEntityCoords(playerVehicle)
+                local seen = {}
                 
                 -- 周りの車両をゴースト化（players モードはプレイヤーが運転している車だけ）
                 local vehicles = GetGamePool('CVehicle')
@@ -632,9 +651,13 @@ function StartSoloGhostMode()
                             
                             -- すり抜ける車両を半透明に
                             SetEntityAlpha(otherVehicle, 150, false)
+                            seen[otherVehicle] = true
+                            alphaApplied[otherVehicle] = true
                         end
                     end
                 end
+                
+                ResetUnghostedAlpha(alphaApplied, seen)
             end
             
             Wait(0)  -- 毎フレーム（衝突回避は即時性が重要）
@@ -836,8 +859,18 @@ function StartRace(race)
             return
         end
         
-        -- ロック開始。準備中にスタート地点から離れていたら準備開始時の位置に戻す（向きはそのまま）
+        -- ロック開始。準備中に降りた・乗り換えた場合は準備開始時の車両に戻す
         local countdownVehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+        if prepVehicle ~= 0 and countdownVehicle ~= prepVehicle and PutPedBackInVehicle(prepVehicle) then
+            countdownVehicle = prepVehicle
+            lib.notify({
+                title = 'レース車両に戻しました',
+                description = '準備中に降りたため、元の車両に戻しました',
+                type = 'warning'
+            })
+        end
+        
+        -- 準備中にスタート地点から離れていたら準備開始時の位置に戻す（向きはそのまま）
         if countdownVehicle ~= 0 and prepCoords and startCp
             and #(GetEntityCoords(countdownVehicle) - vector3(startCp.x, startCp.y, startCp.z)) > startRadius then
             SetEntityCoords(countdownVehicle, prepCoords.x, prepCoords.y, prepCoords.z, false, false, false, false)
@@ -911,6 +944,19 @@ function StartRace(race)
         CreateThread(RaceDrawThread)
         CreateThread(SoloRaceUI)
     end)
+end
+
+-- 準備中に降りた・乗り換えた人を元の車両の運転席に戻す。戻せたら true
+function PutPedBackInVehicle(vehicle)
+    local ped = PlayerPedId()
+    if GetVehiclePedIsIn(ped, false) == vehicle then return true end
+    if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) or IsEntityDead(vehicle) then return false end
+    
+    local driver = GetPedInVehicleSeat(vehicle, -1)
+    if driver ~= 0 and driver ~= ped then return false end
+    
+    TaskWarpPedIntoVehicle(ped, vehicle, -1)
+    return true
 end
 
 -- 準備カウントの表示（ロックなし。向きの確認をうながす）

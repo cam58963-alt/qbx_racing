@@ -1223,7 +1223,7 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
     -- 近くのチェックポイント・ガイドだけを選んで描く（選び直しは一定間隔）
     local drawDistance = GetConfigValue('Checkpoint.creationDraw.distance', 300.0)
     local maxVisibleCheckpoints = GetConfigValue('Checkpoint.creationDraw.maxCheckpoints', 30)
-    local maxVisibleGuides = GetConfigValue('Checkpoint.creationDraw.maxTurnGuides', 10)
+    local maxGuideArrows = GetConfigValue('Checkpoint.creationDraw.maxTurnGuideArrows', 24)
     local visibleCheckpoints, visibleGuides = {}, {}
     local nextVisibleUpdate = 0
     
@@ -1258,7 +1258,15 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
             if now >= nextVisibleUpdate then
                 nextVisibleUpdate = now + 250
                 visibleCheckpoints = NearestIndexes(checkpoints, coords, maxVisibleCheckpoints)
-                visibleGuides = NearestIndexes(turnGuides, coords, maxVisibleGuides)
+                
+                -- ガイドは横に長いものほど描くマーカーが多いので、矢印の合計本数で区切る
+                visibleGuides = {}
+                local arrows = 0
+                for _, index in ipairs(NearestIndexes(turnGuides, coords, #turnGuides)) do
+                    arrows = arrows + math.max(1, turnGuides[index].segments or 1)
+                    if arrows > maxGuideArrows then break end
+                    visibleGuides[#visibleGuides + 1] = index
+                end
                 
                 -- 最後に置いたチェックポイントは離れていても表示する
                 local latest = #checkpoints
@@ -1491,12 +1499,13 @@ local function UnfreezeCountdownVehicles()
 end
 
 -- returnCoords: 準備中にスタート地点（startAreaRadius）から離れていた時に戻す位置（準備開始時の位置）
-function StartCountdownRestrictions(sessionId, startPoint, duration, returnCoords)
+-- raceVehicle: サーバーが確認したレース用の車両（乗り直させた直後は乗車判定が遅れるため直接渡す）
+function StartCountdownRestrictions(sessionId, startPoint, duration, returnCoords, raceVehicle)
     isInCountdown = true
     local endTime = GetGameTimer() + (duration * 1000)
     -- 全員をスタート地点1点に戻すと車両が重なるため、ロック開始時の各自の位置で固定する
     -- （スタート地点付近にいるかはサーバーが startAreaRadius で確認済み。準備中に離れた人は準備開始時の位置に戻す）
-    local initialVehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    local initialVehicle = raceVehicle or GetVehiclePedIsIn(PlayerPedId(), false)
     local lockCoords = initialVehicle ~= 0 and GetEntityCoords(initialVehicle)
         or vector3(startPoint.x, startPoint.y, startPoint.z)
     local startAreaRadius = GetConfigValue('Multiplayer.countdownRestrictions.startAreaRadius', 30.0)
@@ -1611,6 +1620,7 @@ RegisterNetEvent('qbx_racing:client:countdownStarted', function(data)
     countdownContext = {
         sessionId = data.sessionId,
         startPoint = data.startPoint,
+        vehicle = vehicle,  -- サーバーが確認した車両（進捗とゴールはこの車両でしか受け付けない）
         returnCoords = vehicle ~= 0 and GetEntityCoords(vehicle) or nil,
         locked = false,
         previewToken = StartStartPreview and StartStartPreview(data.race) or nil
@@ -1634,7 +1644,23 @@ RegisterNetEvent('qbx_racing:client:countdownTick', function(data)
     local context = countdownContext
     if context and not context.locked and context.sessionId == data.sessionId then
         context.locked = true
-        StartCountdownRestrictions(context.sessionId, context.startPoint, countdown, context.returnCoords)
+        
+        -- 準備中に降りた・乗り換えた場合は、サーバーが確認した車両に乗せ直す
+        -- （別の車両では進捗が受け付けられないため。車両がなくなっていたらスタート時にリタイア）
+        local raceVehicle = context.vehicle ~= 0 and context.vehicle or nil
+        if raceVehicle and GetVehiclePedIsIn(PlayerPedId(), false) ~= raceVehicle then
+            if PutPedBackInVehicle(raceVehicle) then
+                lib.notify({
+                    title = 'レース車両に戻しました',
+                    description = 'このレースは最初に乗っていた車両でしか走れません',
+                    type = 'warning'
+                })
+            else
+                context.vehicleLost = true
+                raceVehicle = nil
+            end
+        end
+        StartCountdownRestrictions(context.sessionId, context.startPoint, countdown, context.returnCoords, raceVehicle)
     end
     
     ShowStartLockCount(countdown)
@@ -1673,12 +1699,18 @@ RegisterNetEvent('qbx_racing:client:multiRaceStart', function(data)
     DebugLog('Multiplayer race started for session: ' .. data.sessionId)
     
     -- ロビー状態を終了（以降は race_logic.lua がレースを管理）
+    local vehicleLost = countdownContext and countdownContext.vehicleLost
     isInCountdown = false
     ResetSessionState()
     
     -- マルチプレイヤーレース開始（race_logic.luaの関数を呼び出し）
     if StartMultiplayerRace then
         StartMultiplayerRace(data.race, data.sessionId, data.participants)
+        
+        -- レース用の車両がなくなっていた（別の車両では進捗が受け付けられない）
+        if vehicleLost and RetireMultiplayerRace then
+            RetireMultiplayerRace(false, 'レースに使う車両がなくなったため、リタイアになりました')
+        end
     else
         print('^1[CAM Racing]^7 エラー: StartMultiplayerRace関数が見つかりません（race_logic.luaを確認してください）')
     end
