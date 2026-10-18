@@ -295,6 +295,11 @@ function RaceMarkers.DrawRouteLine(playerPos, target, nextCp, targetKind, vehicl
     end
 end
 
+-- 予告表示している先のチェックポイントの曲がり角ガイドも出すか
+function RaceMarkers.ShowTurnGuidesAhead()
+    return markerConfig.turnGuide and markerConfig.turnGuide.showAhead ~= false
+end
+
 -- 予告表示する個数
 function RaceMarkers.GetPreviewCount()
     local preview = markerConfig.preview

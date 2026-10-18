@@ -17,6 +17,7 @@ local sessionParticipants = {}
 local isCreatingRace = false
 local raceCreationData = nil
 local isInCountdown = false
+local countdownContext = nil  -- マルチのカウントダウン中の情報（スタート地点・準備開始時の位置・コース表示）
 local sessionStatus = nil      -- 'lobby' | 'countdown' | 'racing'（サーバーの sessionUpdate で更新）
 local lobbyIsHost = false
 local lobbyRace = nil
@@ -232,8 +233,9 @@ function ShowSessionCreateDialog(race)
         },
         {
             type = 'number',
-            label = 'カウントダウン時間（秒）',
-            description = 'レース開始前のカウントダウン',
+            label = '準備時間（秒）',
+            description = string.format('スタート前に向きを確認する時間（車両ロックなし）。このあと%d秒ロックしてスタート',
+                GetConfigValue('Race.lockSeconds', 3)),
             default = GetConfigValue('Multiplayer.defaultCountdown', 10),
             min = GetConfigValue('Multiplayer.minCountdown', 5),
             max = GetConfigValue('Multiplayer.maxCountdown', 30)
@@ -948,6 +950,18 @@ RegisterNUICallback('createRace', function(data, cb)
             min = 1,
             max = 10,
             icon = 'rotate'
+        },
+        {
+            type = 'select',
+            label = 'ゴーストモード',
+            description = 'レース中にすり抜けられる車両',
+            options = {
+                {value = 'players', label = '👥 プレイヤーのみ（NPCの車とはぶつかる）'},
+                {value = 'full', label = '👻 フル（NPCの車もすり抜け）'}
+            },
+            default = 'full',
+            required = true,
+            icon = 'ghost'
         }
     })
     
@@ -958,7 +972,8 @@ RegisterNUICallback('createRace', function(data, cb)
             description = input[2] or '',
             vehicleType = input[3],
             raceType = input[4],
-            laps = input[4] == 'sprint' and 1 or input[5]
+            laps = input[4] == 'sprint' and 1 or input[5],
+            ghostMode = input[6] == 'players' and 'players' or 'full'
         }
         
         DebugLog('Race creation data prepared: ' .. raceCreationData.name)
@@ -1063,6 +1078,11 @@ end
 
 -- セッション状態をリセット
 function ResetSessionState()
+    -- カウントダウン中のコース表示を止める
+    if countdownContext and StopStartPreview then
+        StopStartPreview(countdownContext.previewToken)
+    end
+    countdownContext = nil
     isInSession = false
     currentSession = nil
     sessionParticipants = {}
@@ -1199,6 +1219,32 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
     
     ShowCreationGuide()
     
+    -- 一度に描けるマーカーの数には上限があり、全部描くと60個あたりから消えるため、
+    -- 近くのチェックポイント・ガイドだけを選んで描く（選び直しは一定間隔）
+    local drawDistance = GetConfigValue('Checkpoint.creationDraw.distance', 300.0)
+    local maxVisibleCheckpoints = GetConfigValue('Checkpoint.creationDraw.maxCheckpoints', 30)
+    local maxGuideArrows = GetConfigValue('Checkpoint.creationDraw.maxTurnGuideArrows', 24)
+    local visibleCheckpoints, visibleGuides = {}, {}
+    local nextVisibleUpdate = 0
+    
+    -- list の中から coords に近い順に最大 limit 個の番号を返す
+    local function NearestIndexes(list, coords, limit)
+        local near = {}
+        for i, point in ipairs(list) do
+            local distance = #(coords - vector3(point.x, point.y, point.z))
+            if distance <= drawDistance then
+                near[#near + 1] = {index = i, distance = distance}
+            end
+        end
+        table.sort(near, function(a, b) return a.distance < b.distance end)
+        
+        local indexes = {}
+        for i = 1, math.min(limit, #near) do
+            indexes[#indexes + 1] = near[i].index
+        end
+        return indexes
+    end
+    
     -- 作成モードのメインループ
     CreateThread(function()
         while isCreatingRace do
@@ -1206,6 +1252,38 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
             
             local ped = PlayerPedId()
             local coords = GetEntityCoords(ped)
+            
+            -- 表示するチェックポイント・ガイドを選び直す
+            local now = GetGameTimer()
+            if now >= nextVisibleUpdate then
+                nextVisibleUpdate = now + 250
+                visibleCheckpoints = NearestIndexes(checkpoints, coords, maxVisibleCheckpoints)
+                
+                -- ガイドは横に長いものほど描くマーカーが多いので、矢印の合計本数で区切る
+                visibleGuides = {}
+                local arrows = 0
+                for _, index in ipairs(NearestIndexes(turnGuides, coords, #turnGuides)) do
+                    arrows = arrows + math.max(1, turnGuides[index].segments or 1)
+                    if arrows > maxGuideArrows then break end
+                    visibleGuides[#visibleGuides + 1] = index
+                end
+                
+                -- 最後に置いたチェックポイントは離れていても表示する
+                local latest = #checkpoints
+                if latest > 0 then
+                    local hasLatest = false
+                    for _, index in ipairs(visibleCheckpoints) do
+                        if index == latest then hasLatest = true break end
+                    end
+                    if not hasLatest then
+                        if #visibleCheckpoints >= maxVisibleCheckpoints then
+                            visibleCheckpoints[#visibleCheckpoints] = latest
+                        else
+                            visibleCheckpoints[#visibleCheckpoints + 1] = latest
+                        end
+                    end
+                end
+            end
             
             -- 現在位置に設置予定マーカーを表示
             DrawMarker(
@@ -1218,8 +1296,10 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
                 false, false, 2, false, nil, nil, false
             )
             
-            -- 設置済みチェックポイントを表示
-            for i, cp in ipairs(checkpoints) do
+            -- 設置済みチェックポイントを表示（近くのものだけ。削除直後の番号は飛ばす）
+            for _, i in ipairs(visibleCheckpoints) do
+                local cp = checkpoints[i]
+                if not cp then goto continueCheckpoint end
                 local isLatest = i == #checkpoints
                 
                 -- 自作マーカー（最新以外は薄く表示）、無効な場合は標準マーカー
@@ -1239,10 +1319,13 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
                 
                 -- チェックポイント番号表示
                 DrawLabel(cp.x, cp.y, cp.z + 1.5, tostring(i))
+                ::continueCheckpoint::
             end
             
-            -- 設置済み曲がり角ガイドを表示（どのCPに向かう時に出るかをラベル表示）
-            for _, guide in ipairs(turnGuides) do
+            -- 設置済み曲がり角ガイドを表示（近くのものだけ。どのCPに向かう時に出るかをラベル表示）
+            for _, guideIndex in ipairs(visibleGuides) do
+                local guide = turnGuides[guideIndex]
+                if not guide then goto continueGuide end
                 local arrow = guide.direction == 'left' and '←' or '→'
                 if guide.segments > 1 then
                     arrow = arrow .. '×' .. guide.segments
@@ -1265,6 +1348,7 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
                     axisY = axisY
                 }, vehicleType)
                 DrawLabel(guide.x, guide.y, guide.z + 1.5, nearest and string.format('%s CP%d', arrow, nearest) or arrow)
+                ::continueGuide::
             end
             
             -- E: チェックポイント設置
@@ -1346,6 +1430,7 @@ RegisterNetEvent('qbx_racing:client:startCheckpointMode', function()
                         vehicleType = raceCreationData.vehicleType,
                         raceType = raceCreationData.raceType,
                         laps = raceCreationData.laps,
+                        ghostMode = raceCreationData.ghostMode,
                         checkpoints = checkpoints,
                         turnGuides = turnGuides
                     })
@@ -1413,14 +1498,28 @@ local function UnfreezeCountdownVehicles()
     countdownFrozenVehicles = {}
 end
 
-function StartCountdownRestrictions(sessionId, startPoint, duration)
+-- returnCoords: 準備中にスタート地点（startAreaRadius）から離れていた時に戻す位置（準備開始時の位置）
+-- raceVehicle: サーバーが確認したレース用の車両（乗り直させた直後は乗車判定が遅れるため直接渡す）
+function StartCountdownRestrictions(sessionId, startPoint, duration, returnCoords, raceVehicle)
     isInCountdown = true
     local endTime = GetGameTimer() + (duration * 1000)
-    -- 全員をスタート地点1点に戻すと車両が重なるため、カウントダウン開始時の各自の位置で固定する
-    -- （スタート地点付近にいるかはサーバーが startAreaRadius で確認済み）
-    local initialVehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    -- 全員をスタート地点1点に戻すと車両が重なるため、ロック開始時の各自の位置で固定する
+    -- （スタート地点付近にいるかはサーバーが startAreaRadius で確認済み。準備中に離れた人は準備開始時の位置に戻す）
+    local initialVehicle = raceVehicle or GetVehiclePedIsIn(PlayerPedId(), false)
     local lockCoords = initialVehicle ~= 0 and GetEntityCoords(initialVehicle)
         or vector3(startPoint.x, startPoint.y, startPoint.z)
+    local startAreaRadius = GetConfigValue('Multiplayer.countdownRestrictions.startAreaRadius', 30.0)
+    if initialVehicle ~= 0 and returnCoords
+        and #(lockCoords - vector3(startPoint.x, startPoint.y, startPoint.z)) > startAreaRadius then
+        SetEntityCoords(initialVehicle, returnCoords.x, returnCoords.y, returnCoords.z, false, false, false, false)
+        SetEntityVelocity(initialVehicle, 0.0, 0.0, 0.0)
+        lockCoords = returnCoords
+        lib.notify({
+            title = 'スタート地点に戻しました',
+            description = '準備中にスタート地点から離れたため、元の位置に戻しました',
+            type = 'warning'
+        })
+    end
     local lockHeading = initialVehicle ~= 0 and GetEntityHeading(initialVehicle) or nil
     local maxDistance = GetConfigValue('Multiplayer.countdownRestrictions.maxDistanceFromStart', 3.0)
     local showWarnings = GetConfigValue('Multiplayer.countdownRestrictions.showWarnings', true)
@@ -1502,37 +1601,70 @@ RegisterNetEvent('qbx_racing:client:countdownStarted', function(data)
     end
     lib.hideContext()
     
+    local lockSeconds = data.lockSeconds or GetConfigValue('Race.lockSeconds', 3)
     lib.notify({
-        title = 'カウントダウン開始',
-        description = string.format('%d秒後にスタートします', data.duration),
+        title = 'まもなくスタート',
+        description = string.format('%d秒の準備のあと、車両をロックして%d秒でスタートします。マーカーで向きを確認してください',
+            data.duration, lockSeconds),
         type = 'inform',
-        duration = 3000
+        duration = 5000
     })
     
-    -- カウントダウン中の制限開始
-    StartCountdownRestrictions(data.sessionId, data.startPoint, data.duration)
+    -- 準備中は車両をロックせず、コースのマーカーを表示して向きを確認してもらう
+    -- （ロックは countdownTick の phase = 'lock' から）
+    isInCountdown = true
+    if countdownContext and StopStartPreview then
+        StopStartPreview(countdownContext.previewToken)
+    end
+    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    countdownContext = {
+        sessionId = data.sessionId,
+        startPoint = data.startPoint,
+        vehicle = vehicle,  -- サーバーが確認した車両（進捗とゴールはこの車両でしか受け付けない）
+        returnCoords = vehicle ~= 0 and GetEntityCoords(vehicle) or nil,
+        locked = false,
+        previewToken = StartStartPreview and StartStartPreview(data.race) or nil
+    }
 end)
 
 -- カウントダウンティック
 RegisterNetEvent('qbx_racing:client:countdownTick', function(data)
     local countdown = data.countdown
     
-    lib.showTextUI(
-        '⏱️ **' .. countdown .. '**',
-    {
-        position = "top-center",
-        icon = 'stopwatch',
-        style = {
-            borderRadius = 16,
-            backgroundColor = countdown <= 3 and 'rgba(239, 68, 68, 0.95)' or 'rgba(251, 191, 36, 0.95)',
-            color = 'white',
-            fontSize = '48px',
-            fontWeight = 'bold',
-            padding = '32px'
-        }
-    })
+    -- 準備（ロックなし）
+    if data.phase == 'prep' then
+        ShowStartPrepCount(countdown)
+        if countdown <= 3 then
+            PlaySoundFrontend(-1, 'NAV_UP_DOWN', 'HUD_FRONTEND_DEFAULT_SOUNDSET', true)
+        end
+        return
+    end
     
-    PlaySoundFrontend(-1, countdown == 1 and 'GO' or 'CHECKPOINT_PERFECT', 'HUD_MINI_GAME_SOUNDSET', true)
+    -- ロック開始（最初のロックのカウントで車両を止める）
+    local context = countdownContext
+    if context and not context.locked and context.sessionId == data.sessionId then
+        context.locked = true
+        
+        -- 準備中に降りた・乗り換えた場合は、サーバーが確認した車両に乗せ直す
+        -- （別の車両では進捗が受け付けられないため。車両がなくなっていたらスタート時にリタイア）
+        local raceVehicle = context.vehicle ~= 0 and context.vehicle or nil
+        if raceVehicle and GetVehiclePedIsIn(PlayerPedId(), false) ~= raceVehicle then
+            if PutPedBackInVehicle(raceVehicle) then
+                lib.notify({
+                    title = 'レース車両に戻しました',
+                    description = 'このレースは最初に乗っていた車両でしか走れません',
+                    type = 'warning'
+                })
+            else
+                context.vehicleLost = true
+                raceVehicle = nil
+            end
+        end
+        StartCountdownRestrictions(context.sessionId, context.startPoint, countdown, context.returnCoords, raceVehicle)
+    end
+    
+    ShowStartLockCount(countdown)
+    PlaySoundFrontend(-1, 'CHECKPOINT_PERFECT', 'HUD_MINI_GAME_SOUNDSET', true)
     
     SetTimeout(800, function()
         lib.hideTextUI()
@@ -1567,12 +1699,18 @@ RegisterNetEvent('qbx_racing:client:multiRaceStart', function(data)
     DebugLog('Multiplayer race started for session: ' .. data.sessionId)
     
     -- ロビー状態を終了（以降は race_logic.lua がレースを管理）
+    local vehicleLost = countdownContext and countdownContext.vehicleLost
     isInCountdown = false
     ResetSessionState()
     
     -- マルチプレイヤーレース開始（race_logic.luaの関数を呼び出し）
     if StartMultiplayerRace then
         StartMultiplayerRace(data.race, data.sessionId, data.participants)
+        
+        -- レース用の車両がなくなっていた（別の車両では進捗が受け付けられない）
+        if vehicleLost and RetireMultiplayerRace then
+            RetireMultiplayerRace(false, 'レースに使う車両がなくなったため、リタイアになりました')
+        end
     else
         print('^1[CAM Racing]^7 エラー: StartMultiplayerRace関数が見つかりません（race_logic.luaを確認してください）')
     end

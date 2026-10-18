@@ -318,6 +318,33 @@ function IsVehicleOwnedByRacer(vehicle)
     return false
 end
 
+-- プレイヤーが運転している車両か（NPCの車・駐車中の車は false）
+local function IsPlayerDrivenVehicle(vehicle)
+    local driver = GetPedInVehicleSeat(vehicle, -1)
+    return driver ~= 0 and IsPedAPlayer(driver)
+end
+
+-- レースのゴーストモード（players = プレイヤーの車だけ / full = NPCの車も）
+local function GetRaceGhostMode()
+    return currentRace and currentRace.ghost_mode == 'players' and 'players' or 'full'
+end
+
+-- この車両をすり抜けるか
+local function ShouldGhostVehicle(vehicle, ghostMode, isRacer)
+    return ghostMode == 'full' or isRacer or IsPlayerDrivenVehicle(vehicle)
+end
+
+-- 今回ゴースト化しなかった車両（運転手が降りた・範囲外に出たなど）の透明度を戻す
+-- applied: これまでに透明度を変えた車両、seen: 今回ゴースト化した車両
+local function ResetUnghostedAlpha(applied, seen)
+    for vehicle in pairs(applied) do
+        if not seen[vehicle] then
+            if DoesEntityExist(vehicle) then ResetEntityAlpha(vehicle) end
+            applied[vehicle] = nil
+        end
+    end
+end
+
 -- 視覚効果適用
 function ApplyGhostVisualEffect(vehicle, isRacer)
     local config = GetConfigValue('Multiplayer.ghostMode.visual', {
@@ -349,6 +376,8 @@ function StartGhostMode()
     CreateThread(function()
         local updateInterval = GetConfigValue('Multiplayer.ghostMode.updateInterval', 0)
         local collisionRadius = GetConfigValue('Multiplayer.ghostMode.collisionRadius', 150.0)
+        local ghostMode = GetRaceGhostMode()
+        local alphaApplied = {}
         
         while isRacing and isMultiplayerRace and isGhostModeActive do
             local playerPed = PlayerPedId()
@@ -356,6 +385,7 @@ function StartGhostMode()
             
             if playerVehicle ~= 0 then
                 local playerCoords = GetEntityCoords(playerVehicle)
+                local seen = {}
                 
                 -- 全車両を取得（NPC車両含む）
                 local vehicles = GetGamePool('CVehicle')
@@ -366,10 +396,8 @@ function StartGhostMode()
                         local distance = #(playerCoords - otherCoords)
                         
                         -- 設定範囲内の車両に対して処理
-                        if distance <= collisionRadius then
-                            -- レース参加者かどうか判定
-                            local isRacerVehicle = IsVehicleOwnedByRacer(otherVehicle)
-                            
+                        local isRacerVehicle = distance <= collisionRadius and IsVehicleOwnedByRacer(otherVehicle)
+                        if distance <= collisionRadius and ShouldGhostVehicle(otherVehicle, ghostMode, isRacerVehicle) then
                             -- 衝突無効化（一方向：自分が相手をすり抜ける）
                             SetEntityNoCollisionEntity(playerVehicle, otherVehicle, true)
                             
@@ -380,9 +408,13 @@ function StartGhostMode()
                             
                             -- 視覚効果
                             ApplyGhostVisualEffect(otherVehicle, isRacerVehicle)
+                            seen[otherVehicle] = true
+                            alphaApplied[otherVehicle] = true
                         end
                     end
                 end
+                
+                ResetUnghostedAlpha(alphaApplied, seen)
             end
             
             Wait(updateInterval)
@@ -492,6 +524,7 @@ function StartGhostModeOptimized()
     
     CreateThread(function()
         local updateInterval = GetConfigValue('Multiplayer.ghostMode.updateInterval', 0)
+        local ghostMode = GetRaceGhostMode()
         
         while isRacing and isMultiplayerRace and isGhostModeActive do
             local playerPed = PlayerPedId()
@@ -512,8 +545,13 @@ function StartGhostModeOptimized()
                     local distance = vehicleData.distance
                     local isRacer = vehicleData.isRacer
                     
-                    if vehicle ~= playerVehicle and DoesEntityExist(vehicle) then
+                    if vehicle ~= playerVehicle and DoesEntityExist(vehicle)
+                        and ShouldGhostVehicle(vehicle, ghostMode, isRacer) then
                         ProcessVehicleGhosting(playerVehicle, vehicle, distance, isRacer)
+                    elseif ghostedEntities[vehicle] then
+                        -- 対象外になった車両（運転手が降りたなど）はすぐ透明度を戻す
+                        if DoesEntityExist(vehicle) then ResetEntityAlpha(vehicle) end
+                        ghostedEntities[vehicle] = nil
                     end
                 end
             end
@@ -591,6 +629,8 @@ function StartSoloGhostMode()
     
     CreateThread(function()
         local collisionRadius = GetConfigValue('Multiplayer.ghostMode.collisionRadius', 150.0)
+        local ghostMode = GetRaceGhostMode()
+        local alphaApplied = {}
         
         while isRacing and not isMultiplayerRace and isGhostModeActive do
             local playerPed = PlayerPedId()
@@ -598,8 +638,9 @@ function StartSoloGhostMode()
             
             if playerVehicle ~= 0 then
                 local playerCoords = GetEntityCoords(playerVehicle)
+                local seen = {}
                 
-                -- 全NPC車両をゴースト化
+                -- 周りの車両をゴースト化（players モードはプレイヤーが運転している車だけ）
                 local vehicles = GetGamePool('CVehicle')
                 
                 for _, otherVehicle in ipairs(vehicles) do
@@ -607,16 +648,20 @@ function StartSoloGhostMode()
                         local otherCoords = GetEntityCoords(otherVehicle)
                         local distance = #(playerCoords - otherCoords)
                         
-                        if distance <= collisionRadius then
-                            -- NPC車両との衝突無効化
+                        if distance <= collisionRadius and ShouldGhostVehicle(otherVehicle, ghostMode, false) then
+                            -- 衝突無効化
                             SetEntityNoCollisionEntity(playerVehicle, otherVehicle, true)
                             SetEntityNoCollisionEntity(otherVehicle, playerVehicle, true)
                             
-                            -- NPC車両を半透明に
+                            -- すり抜ける車両を半透明に
                             SetEntityAlpha(otherVehicle, 150, false)
+                            seen[otherVehicle] = true
+                            alphaApplied[otherVehicle] = true
                         end
                     end
                 end
+                
+                ResetUnghostedAlpha(alphaApplied, seen)
             end
             
             Wait(0)  -- 毎フレーム（衝突回避は即時性が重要）
@@ -729,7 +774,9 @@ function StartRace(race)
     end
     
     -- カウントダウン（スレッド内でブロックしないように実装）
-    local countdownDuration = GetConfigValue('Race.countdownSeconds', 5)
+    -- 準備（ロックなし・マーカー表示で向きを確認）→ ロックしてカウント → スタート
+    local prepSeconds = math.max(0, math.floor(tonumber(GetConfigValue('Race.prepSeconds', 10)) or 10))
+    local lockSeconds = math.max(1, math.floor(tonumber(GetConfigValue('Race.lockSeconds', 3)) or 3))
     local startRadius = GetConfigValue('Checkpoint.radius', 10.0) * 2 -- スタート判定は広めに
     
     local thisRace = race
@@ -786,43 +833,78 @@ function StartRace(race)
         -- ウェイポイント削除
         SetWaypointOff()
         
-        -- 即座にカウントダウン開始
+        -- 準備カウント（車両はロックしない）。コースのマーカーを出して向きを確認してもらう
+        local prepVehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+        local prepCoords = prepVehicle ~= 0 and GetEntityCoords(prepVehicle) or nil
+        local previewToken = StartStartPreview(thisRace)
+        
         lib.notify({
-            title = 'カウントダウン開始！',
-            description = string.format('%d秒後にスタートします', countdownDuration),
+            title = 'まもなくスタート',
+            description = string.format('%d秒の準備のあと、車両をロックして%d秒でスタートします。マーカーで向きを確認してください',
+                prepSeconds, lockSeconds),
             type = 'inform',
-            duration = 2000
+            duration = 5000
         })
         
-        -- カウントダウン中は車両を止める（走りながらのスタートで記録が縮まないように）
+        for i = prepSeconds, 1, -1 do
+            if currentRace ~= thisRace then
+                StopStartPreview(previewToken)
+                return
+            end
+            ShowStartPrepCount(i)
+            if i <= 3 then
+                PlaySoundFrontend(-1, 'NAV_UP_DOWN', 'HUD_FRONTEND_DEFAULT_SOUNDSET', true)
+            end
+            Wait(1000)
+        end
+        lib.hideTextUI()
+        if currentRace ~= thisRace then
+            StopStartPreview(previewToken)
+            return
+        end
+        
+        -- ロック開始。準備中に降りた・乗り換えた場合は準備開始時の車両に戻す
         local countdownVehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+        if prepVehicle ~= 0 and countdownVehicle ~= prepVehicle and PutPedBackInVehicle(prepVehicle) then
+            countdownVehicle = prepVehicle
+            lib.notify({
+                title = 'レース車両に戻しました',
+                description = '準備中に降りたため、元の車両に戻しました',
+                type = 'warning'
+            })
+        end
+        
+        -- 準備中にスタート地点から離れていたら準備開始時の位置に戻す（向きはそのまま）
+        if countdownVehicle ~= 0 and prepCoords and startCp
+            and #(GetEntityCoords(countdownVehicle) - vector3(startCp.x, startCp.y, startCp.z)) > startRadius then
+            SetEntityCoords(countdownVehicle, prepCoords.x, prepCoords.y, prepCoords.z, false, false, false, false)
+            SetEntityVelocity(countdownVehicle, 0.0, 0.0, 0.0)
+            lib.notify({
+                title = 'スタート地点に戻しました',
+                description = '準備中にスタート地点から離れたため、元の位置に戻しました',
+                type = 'warning'
+            })
+        end
+        
+        -- ロック中は車両を止める（走りながらのスタートで記録が縮まないように）
         soloCountdownVehicle = countdownVehicle
         if countdownVehicle ~= 0 then
             FreezeEntityPosition(countdownVehicle, true)
         end
         
-        for i = countdownDuration, 1, -1 do
+        for i = lockSeconds, 1, -1 do
             if currentRace ~= thisRace then
                 if countdownVehicle ~= 0 then FreezeEntityPosition(countdownVehicle, false) end
                 soloCountdownVehicle = 0
+                StopStartPreview(previewToken)
                 return
             end
-            lib.showTextUI(string.format([[%d]], i), {
-                position = "top-center",
-                icon = 'stopwatch',
-                style = {
-                    borderRadius = 16,
-                    backgroundColor = i <= 3 and 'rgba(239, 68, 68, 0.95)' or 'rgba(251, 191, 36, 0.95)',
-                    color = 'white',
-                    fontSize = '48px',
-                    fontWeight = 'bold',
-                    padding = '24px 48px'
-                }
-            })
+            ShowStartLockCount(i)
             PlaySoundFrontend(-1, 'CHECKPOINT_PERFECT', 'HUD_MINI_GAME_SOUNDSET', true)
             Wait(1000)
             lib.hideTextUI()
         end
+        StopStartPreview(previewToken)
         
         -- GO!
         lib.showTextUI('GO!', {
@@ -866,6 +948,52 @@ function StartRace(race)
         CreateThread(RaceDrawThread)
         CreateThread(SoloRaceUI)
     end)
+end
+
+-- 準備中に降りた・乗り換えた人を元の車両の運転席に戻す。戻せたら true
+function PutPedBackInVehicle(vehicle)
+    local ped = PlayerPedId()
+    if GetVehiclePedIsIn(ped, false) == vehicle then return true end
+    if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) or IsEntityDead(vehicle) then return false end
+    
+    local driver = GetPedInVehicleSeat(vehicle, -1)
+    if driver ~= 0 and driver ~= ped then return false end
+    
+    TaskWarpPedIntoVehicle(ped, vehicle, -1)
+    return true
+end
+
+-- 準備カウントの表示（ロックなし。向きの確認をうながす）
+function ShowStartPrepCount(count)
+    lib.showTextUI(string.format('準備 **%d**  \n向きを確認してください（まだ動けます）', count), {
+        position = 'top-center',
+        icon = 'compass',
+        style = {
+            borderRadius = 8,
+            backgroundColor = 'rgba(26, 26, 46, 0.85)',
+            color = '#ffffff',
+            borderLeft = '3px solid #fbbf24',
+            fontSize = '14px',
+            lineHeight = '1.5',
+            padding = '8px 14px'
+        }
+    })
+end
+
+-- ロック中のカウント表示（この後スタート）
+function ShowStartLockCount(count)
+    lib.showTextUI(tostring(count), {
+        position = 'top-center',
+        icon = 'stopwatch',
+        style = {
+            borderRadius = 16,
+            backgroundColor = 'rgba(239, 68, 68, 0.95)',
+            color = 'white',
+            fontSize = '48px',
+            fontWeight = 'bold',
+            padding = '24px 48px'
+        }
+    })
 end
 
 -- レース進行（ソロ・マルチ共通）
@@ -1060,6 +1188,7 @@ function RetireSoloRace(reason)
         raceCheckpoints = {}
         ClearRaceBlips()
         ClearCheckpointEntities()
+        StopStartPreview()
         SetWaypointOff()
         lib.hideTextUI()
         local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
@@ -1213,7 +1342,8 @@ function StartMultiplayerRace(race, sessionId, participants)
     
     lib.notify({
         title = 'ゴーストモード有効',
-        description = '他の車両をすり抜けられます',
+        description = GetRaceGhostMode() == 'players' and '他のプレイヤーの車をすり抜けられます（NPCの車とはぶつかります）'
+            or 'NPCを含む他の車両をすり抜けられます',
         type = 'inform',
         duration = 3000
     })
@@ -1391,6 +1521,18 @@ function CreateCheckpointEntity(cpType, pos, pointTo, radius, height, color, ico
     return cp
 end
 
+-- 標準チェックポイント（CreateCheckpoint）の見た目の設定
+function GetStandardCheckpointConfig(vehicleType)
+    return GetConfigValue('VehicleTypes.' .. (vehicleType or 'car') .. '.checkpoint', {
+        type = 0, typeNoArrow = 2, goalType = 4,
+        radius = 10.0, height = 5.0, nearHeight = 100.0,
+        color = {r = 255, g = 0, b = 0, a = 200},
+        goalColor = {r = 255, g = 215, b = 0, a = 200},
+        nextColor = {r = 255, g = 255, b = 255, a = 80},
+        iconColor = {r = 255, g = 255, b = 255, a = 255}
+    })
+end
+
 -- 現在のチェックポイント表示を更新（進行に合わせて呼び出す）
 function UpdateRaceCheckpoints()
     -- 既存のチェックポイントエンティティを全削除して再生成
@@ -1401,15 +1543,7 @@ function UpdateRaceCheckpoints()
 
     if not currentRace or not isRacing then return end
 
-    local vehicleType = currentRace.vehicle_type or 'car'
-    local cpConfig = GetConfigValue('VehicleTypes.' .. vehicleType .. '.checkpoint', {
-        type = 0, typeNoArrow = 2, goalType = 4,
-        radius = 10.0, height = 5.0, nearHeight = 100.0,
-        color = {r = 255, g = 0, b = 0, a = 200},
-        goalColor = {r = 255, g = 215, b = 0, a = 200},
-        nextColor = {r = 255, g = 255, b = 255, a = 80},
-        iconColor = {r = 255, g = 255, b = 255, a = 255}
-    })
+    local cpConfig = GetStandardCheckpointConfig(currentRace.vehicle_type)
 
     local lapEnd = LapEndIndex()
 
@@ -1511,6 +1645,8 @@ local function DrawCustomRaceMarkers(turns, isCircuit, vehicleType)
     end
     
     -- 先のチェックポイントの予告（周回レースは次の周までつなげて表示）
+    -- 曲がり角ガイドも、予告しているチェックポイントの分を同じ薄さで表示する
+    local showGuidesAhead = RaceMarkers.ShowTurnGuidesAhead()
     local lap, index = currentLap, currentCheckpoint
     for ahead = 1, RaceMarkers.GetPreviewCount() do
         if IsFinishPosition(lap, index) then break end
@@ -1525,6 +1661,11 @@ local function DrawCustomRaceMarkers(turns, isCircuit, vehicleType)
             RaceMarkers.Draw('finish', previewCp, alpha * 0.5, vehicleType)
         else
             RaceMarkers.Draw('preview', previewCp, alpha, vehicleType)
+            
+            local aheadTurns = showGuidesAhead and turns[index > total and 1 or index]
+            for _, turn in ipairs(aheadTurns or {}) do
+                RaceMarkers.DrawTurnGuide(turn, vehicleType, alpha)
+            end
         end
     end
 end
@@ -1557,6 +1698,117 @@ function RaceDrawThread()
 end
 
 -- ===================================
+-- スタート前のコース表示（カウントダウン中に向きを確認してもらう）
+-- スタート直後に向かうチェックポイント（CP2）と、その先・ルート線・曲がり角ガイドを表示する
+-- ===================================
+local startPreviewToken = 0
+local startPreviewEntities = {}
+
+-- token を渡すと、その表示がまだ続いている時だけ止める（新しい表示を消さないように）
+function StopStartPreview(token)
+    if token and token ~= startPreviewToken then return end
+    startPreviewToken = startPreviewToken + 1
+    for _, handle in ipairs(startPreviewEntities) do
+        DeleteCheckpoint(handle)
+    end
+    startPreviewEntities = {}
+end
+
+-- 表示を始めて token を返す（race: checkpoints / vehicle_type / race_type / laps / turnGuides）
+function StartStartPreview(race)
+    StopStartPreview()
+    local token = startPreviewToken
+    local checkpoints = race and race.checkpoints or {}
+    if #checkpoints < 2 then return token end
+    
+    local vehicleType = race.vehicle_type or 'car'
+    local isCircuit = race.race_type ~= 'sprint'
+    local isOneLap = not isCircuit or math.max(1, tonumber(race.laps) or 1) == 1
+    
+    -- スタート後 offset 番目に向かうチェックポイント（0 = CP2）と、それがゴールか
+    -- 周回は最後にスタート地点（CP1）へ戻る。2周以上ならそこはゴールではないので、表示はそこまで
+    local function PointAt(offset)
+        local index = 2 + offset
+        if index <= #checkpoints then
+            return checkpoints[index], not isCircuit and index == #checkpoints
+        elseif isCircuit and index == #checkpoints + 1 then
+            return checkpoints[1], isOneLap
+        end
+        return nil, false
+    end
+    
+    -- 標準チェックポイント: 最初に向かうCP（矢印は次のCPへ）と、その次を薄く表示
+    if not RaceMarkers.IsEnabled() then
+        local cpConfig = GetStandardCheckpointConfig(vehicleType)
+        for offset = 0, 1 do
+            local cp, isFinish = PointAt(offset)
+            if not cp then break end
+            local pos = vector3(cp.x, cp.y, cp.z)
+            local nextCp = not isFinish and PointAt(offset + 1) or nil
+            local color = offset == 0 and (isFinish and cpConfig.goalColor or cpConfig.color) or cpConfig.nextColor
+            local handle = CreateCheckpointEntity(
+                isFinish and cpConfig.goalType or cpConfig.type,
+                pos, nextCp and vector3(nextCp.x, nextCp.y, nextCp.z) or nil,
+                cpConfig.radius, cpConfig.height, color, cpConfig.iconColor, cpConfig.nearHeight
+            )
+            -- レース中のチェックポイントとは別に管理する
+            if handle then
+                for i = #activeCheckpointEntities, 1, -1 do
+                    if activeCheckpointEntities[i] == handle then table.remove(activeCheckpointEntities, i) break end
+                end
+                startPreviewEntities[#startPreviewEntities + 1] = handle
+            end
+            if isFinish then break end
+        end
+        return token
+    end
+    
+    -- 自作マーカー: 毎フレーム描画
+    CreateThread(function()
+        local turns = RaceMarkers.BuildTurnGuides(checkpoints, isCircuit, race.turnGuides, vehicleType)
+        local previewCount = RaceMarkers.GetPreviewCount()
+        
+        while startPreviewToken == token do
+            local target, targetIsFinish = PointAt(0)
+            local kind = targetIsFinish and 'finish' or 'checkpoint'
+            local nextCp = not targetIsFinish and PointAt(1) or nil
+            
+            RaceMarkers.Draw(kind, target, nil, vehicleType)
+            RaceMarkers.DrawRouteLine(GetEntityCoords(PlayerPedId()), target, nextCp, kind, vehicleType)
+            
+            if not targetIsFinish then
+                for _, turn in ipairs(turns[2] or {}) do
+                    RaceMarkers.DrawTurnGuide(turn, vehicleType)
+                end
+                
+                local showGuidesAhead = RaceMarkers.ShowTurnGuidesAhead()
+                for ahead = 1, previewCount do
+                    local cp, isFinish = PointAt(ahead)
+                    if not cp then break end
+                    local alpha = RaceMarkers.GetPreviewAlpha(ahead)
+                    if isFinish then
+                        RaceMarkers.Draw('finish', cp, alpha * 0.5, vehicleType)
+                        break
+                    end
+                    RaceMarkers.Draw('preview', cp, alpha, vehicleType)
+                    
+                    -- 予告しているチェックポイントの曲がり角ガイド（周回でスタート地点に戻る区間は CP1 のガイド）
+                    local index = 2 + ahead
+                    local aheadTurns = showGuidesAhead and turns[index > #checkpoints and 1 or index]
+                    for _, turn in ipairs(aheadTurns or {}) do
+                        RaceMarkers.DrawTurnGuide(turn, vehicleType, alpha)
+                    end
+                end
+            end
+            
+            Wait(0)
+        end
+    end)
+    
+    return token
+end
+
+-- ===================================
 -- ユーティリティ関数
 -- ===================================
 
@@ -1585,6 +1837,7 @@ AddEventHandler('onResourceStop', function(resourceName)
         FreezeEntityPosition(soloCountdownVehicle, false)
     end
     soloCountdownVehicle = 0
+    StopStartPreview()
     
     -- レース中の場合はクリーンアップ
     if isRacing then
